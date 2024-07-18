@@ -1,15 +1,16 @@
 apply plugin: 'com.android.application'
 
 android {
-    compileSdkVersion 30
+    compileSdkVersion 34
     defaultConfig {
-        applicationId "com.android.support"
-        minSdkVersion 19
-        targetSdkVersion 30
+        applicationId "vdev.com.android.support"
+        minSdkVersion 21
+        targetSdkVersion 34
         versionCode 1
         versionName "3.2"
         ndk {
-            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86'
+            //noinspection ChromeOsAbiSupport
+            abiFilters 'armeabi-v7a'
         }
         signingConfig signingConfigs.debug
     }
@@ -30,9 +31,13 @@ android {
             path file('src/main/jni/Android.mk')
         }
     }
+    namespace 'vdev.com.android.support'
 }
 
 //dependencies must be placed below 'android' brackets to get it work on AIDE
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'com.android.ndk.thirdparty:curl:7.68.0-alpha-1'
+    implementation 'com.android.ndk.thirdparty:jsoncpp:1.8.4-alpha-1'
+
 }
