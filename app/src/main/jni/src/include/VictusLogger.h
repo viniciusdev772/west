@@ -1,0 +1,66 @@
+//
+// Created by bapan on 18/3/2024.
+//
+#include <iostream>
+#include <string>
+
+enum LogLevel { INFO, WARNING, ERROR, SUCCESS, FAILED };
+
+void LogV(LogLevel level, const std::string& message) {
+    std::string color;
+    switch(level) {
+        case INFO:
+            color = "\033[1;94m";
+            break;
+        case WARNING:
+            color = "\033[1;93m";
+            break;
+        case ERROR:
+            color = "\033[1;91m";
+            break;
+        case SUCCESS:
+            color = "\033[1;92m";
+            break;
+        case FAILED:
+            color = "\033[1;95m";
+            break;
+        default:
+            color = "\033[0m";
+            break;
+    }
+    std::cout << color << message << "\033[0m" << std::endl;
+}
+
+void LogV(LogLevel level, const std::string& message, std::string &input) {
+    std::string color;
+    char c;
+    switch(level) {
+        case INFO:
+            color = "\033[1;94m";
+            break;
+        case WARNING:
+            color = "\033[1;93m";
+            break;
+        case ERROR:
+            color = "\033[1;91m";
+            break;
+        case SUCCESS:
+            color = "\033[1;92m";
+            break;
+        case FAILED:
+            color = "\033[1;95m";
+            break;
+        default:
+            color = "\033[0m";
+            break;
+    }
+    std::cout << color << message << "\033[0m";
+    while (true) {
+        c = std::cin.get();
+        if (c == '\n')
+            break;
+        std::cout << '*';
+        input += c;
+    }
+    std::cout << std::endl;
+}
