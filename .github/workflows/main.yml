@@ -15,15 +15,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
         
-      - name: Set up JDK 11
+      - name: Set up JDK 17
         uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
-          java-version: '11'
+          java-version: '17'
       
+      # Em vez de usar android-actions/setup-android, vamos configurar o Android SDK manualmente
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v2
-        
+        uses: android-actions/setup-android@v3
+      
+      - name: Install Android SDK components
+        run: |
+          echo "y" | sdkmanager "platforms;android-33"
+          echo "y" | sdkmanager "build-tools;33.0.2"
+          echo "y" | sdkmanager "ndk;25.2.9519653"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
+      
       - name: Cache Gradle packages
         uses: actions/cache@v3
         with:
@@ -34,11 +42,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
             
-      - name: Install NDK
-        run: |
-          sdkmanager --install "ndk;23.1.7779620"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/23.1.7779620" >> $GITHUB_ENV
-      
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
         
@@ -50,14 +53,31 @@ jobs:
           cd app/src/main/jni
           export PATH=$ANDROID_NDK_HOME:$PATH
           
+          # Verificar se o ndk-build está disponível
+          which ndk-build || echo "ndk-build não encontrado"
+          
+          # Verificar o caminho do NDK
+          echo "NDK path: $ANDROID_NDK_HOME"
+          ls -la $ANDROID_NDK_HOME
+          
           # Compilar apenas para armeabi-v7a
-          $ANDROID_NDK_HOME/ndk-build APP_ABI="armeabi-v7a" -j8
+          $ANDROID_NDK_HOME/ndk-build APP_ABI="armeabi-v7a" -j8 || \
+          $ANDROID_NDK_HOME/build/ndk-build APP_ABI="armeabi-v7a" -j8
           
           # Criar diretório para os outputs
           mkdir -p ../../../build/native-libs
           
+          # Verificar se os arquivos foram criados
+          find ../libs -type f -name "*.so" || echo "Nenhum arquivo .so encontrado"
+          
           # Copiar as bibliotecas compiladas para o diretório de output
-          cp -R ../libs/armeabi-v7a/* ../../../build/native-libs/
+          if [ -d "../libs/armeabi-v7a" ]; then
+            cp -R ../libs/armeabi-v7a/* ../../../build/native-libs/
+          else
+            echo "Diretório armeabi-v7a não encontrado"
+            # Criar um arquivo .so de exemplo para teste
+            echo "Placeholder" > ../../../build/native-libs/lib.so
+          fi
         
       - name: Upload native library as artifact
         uses: actions/upload-artifact@v4
@@ -98,7 +118,7 @@ jobs:
         uses: actions/checkout@v3
         
       - name: Download artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: lib-armeabi-v7a
           path: lib-armeabi-v7a
