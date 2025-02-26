@@ -60,7 +60,7 @@ jobs:
           cp -R ../libs/armeabi-v7a/* ../../../build/native-libs/
         
       - name: Upload native library as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: lib-armeabi-v7a
           path: app/build/native-libs/
