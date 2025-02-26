@@ -1,103 +1,69 @@
-name: Compile and Release armeabi-v7a Library
+name: Compile and Release Native Library
 
 on:
-  # Executar em cada push para qualquer branch
   push:
-  # Manter a opção de execução manual
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Native Library (armeabi-v7a)
+    name: Build Native Library
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Adiciona permissão explícita para escrever no repositório
-    
+      contents: write
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
         
-      - name: Set up JDK 17
-        uses: actions/setup-java@v3
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-      
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-      
-      - name: Install Android SDK components
+      - name: Setup Android NDK
         run: |
-          echo "y" | sdkmanager "platforms;android-33"
-          echo "y" | sdkmanager "build-tools;33.0.2"
-          echo "y" | sdkmanager "ndk;25.2.9519653"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          
+          # Instalar o Android NDK via cmdline-tools
+          mkdir -p ${ANDROID_HOME}/cmdline-tools
+          wget https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip
+          unzip commandlinetools-linux-8512546_latest.zip -d ${ANDROID_HOME}/cmdline-tools
+          mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest
+          
+          # Configurar PATH
+          export PATH=${ANDROID_HOME}/cmdline-tools/latest/bin:$PATH
+          
+          # Instalar NDK
+          yes | sdkmanager --licenses
+          sdkmanager --install "ndk;25.2.9519653"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/25.2.9519653" >> $GITHUB_ENV
       
-      # Verificar a estrutura do repositório
-      - name: Check repository structure
+      - name: Build native library
         run: |
+          cd app/src/main/jni
+          
+          # Verificar arquivos existentes
+          echo "Arquivos na pasta jni:"
           ls -la
-          if [ -d "app" ]; then
-            echo "app directory exists"
-            ls -la app
+          
+          # Compilar com ndk-build
+          ${ANDROID_NDK_HOME}/ndk-build APP_ABI="armeabi-v7a" V=1
+          
+          # Verificar se o build foi gerado
+          if [ -d "../libs/armeabi-v7a" ]; then
+            echo "Arquivos compilados:"
+            ls -la ../libs/armeabi-v7a
           else
-            echo "app directory does not exist"
-            mkdir -p app/build/native-libs
+            echo "Erro: Falha na compilação. Diretório de saída não encontrado."
+            exit 1
           fi
+          
+          # Criar diretório para output
+          mkdir -p ../../../build/native-libs
+          cp -R ../libs/armeabi-v7a/* ../../../build/native-libs/
       
-      # Vamos compilar a biblioteca diretamente com o NDK, sem depender do Gradle
-      - name: Build native library for armeabi-v7a
-        run: |
-          # Verificar se a pasta jni existe
-          if [ -d "app/src/main/jni" ]; then
-            cd app/src/main/jni
-            export PATH=$ANDROID_NDK_HOME:$PATH
-            
-            # Verificar o caminho do NDK
-            echo "NDK path: $ANDROID_NDK_HOME"
-            ls -la $ANDROID_NDK_HOME
-            
-            # Compilar apenas para armeabi-v7a usando ndk-build
-            $ANDROID_NDK_HOME/ndk-build APP_ABI="armeabi-v7a" -j8 || \
-            $ANDROID_NDK_HOME/build/ndk-build APP_ABI="armeabi-v7a" -j8 || \
-            echo "Falha ao compilar com ndk-build"
-            
-            # Criar diretório para os outputs
-            mkdir -p ../../../build/native-libs
-            
-            # Verificar se os arquivos foram criados
-            find ../libs -type f -name "*.so" || echo "Nenhum arquivo .so encontrado"
-            
-            # Copiar as bibliotecas compiladas para o diretório de output
-            if [ -d "../libs/armeabi-v7a" ]; then
-              cp -R ../libs/armeabi-v7a/* ../../../build/native-libs/
-            else
-              echo "Diretório armeabi-v7a não encontrado"
-              # Criar um arquivo .so de exemplo para teste
-              echo "Placeholder" > ../../../build/native-libs/lib.so
-            fi
-          else
-            echo "Diretório jni não encontrado. Criando arquivos de exemplo."
-            mkdir -p app/build/native-libs
-            echo "Placeholder" > app/build/native-libs/lib.so
-          fi
-        
       - name: Upload native library as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lib-armeabi-v7a
+          name: native-libs
           path: app/build/native-libs/
-          
-      # Gerar arquivo de exemplo se não existir
-      - name: Ensure library file exists
-        run: |
-          mkdir -p app/build/native-libs
-          if [ ! -f "app/build/native-libs/lib.so" ]; then
-            echo "Placeholder" > app/build/native-libs/lib.so
-          fi
-          ls -la app/build/native-libs/
       
-      # Usar a action create-release do próprio GitHub
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -107,33 +73,24 @@ jobs:
           tag_name: release-${{ github.run_number }}
           release_name: Release ${{ github.run_number }}
           body: |
-            Automatic build from push commit: ${{ github.sha }}
-            
-            This release contains the compiled library for:
-            - armeabi-v7a
+            Compilação automática do commit: ${{ github.sha }}
           draft: false
           prerelease: false
-          
-      # Fazer upload do arquivo .so como asset da release
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: app/build/native-libs/lib.so
-          asset_name: lib.so
-          asset_content_type: application/octet-stream
-          
-      # Criar uma tag "latest" que sempre apontará para a build mais recente
-      - name: Create latest tag
+      
+      - name: Upload Release Assets
+        run: |
+          cd app/build/native-libs
+          for file in *.so; do
+            curl -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$file" \
+              "${{ steps.create_release.outputs.upload_url }}?name=$file"
+          done
+      
+      - name: Update latest tag
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          
-          # Deletar a tag "latest" se ela existir
-          git push --delete origin latest || true
-          
-          # Criar uma nova tag "latest" apontando para o commit atual
           git tag -f latest
           git push -f origin latest
