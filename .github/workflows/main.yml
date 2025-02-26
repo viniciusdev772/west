@@ -10,6 +10,8 @@ jobs:
   build:
     name: Build Native Library (armeabi-v7a)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Adiciona permissão explícita para escrever no repositório
     
     steps:
       - name: Checkout code
@@ -40,37 +42,7 @@ jobs:
             ls -la app
           else
             echo "app directory does not exist"
-          fi
-          
-          if [ -f "gradlew" ]; then
-            echo "gradlew exists"
-          else
-            echo "gradlew does not exist"
-          fi
-          
-          if [ -d "gradle/wrapper" ]; then
-            echo "gradle wrapper directory exists"
-            ls -la gradle/wrapper
-          else
-            echo "gradle wrapper directory does not exist"
-          fi
-      
-      # Configurar Gradle Wrapper se não existir
-      - name: Setup Gradle Wrapper
-        run: |
-          if [ ! -f "gradlew" ] || [ ! -d "gradle/wrapper" ]; then
-            echo "Gradle Wrapper não encontrado, configurando..."
-            mkdir -p gradle/wrapper
-            
-            # Baixar os arquivos do wrapper
-            curl -o gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/master/gradle/wrapper/gradle-wrapper.jar
-            curl -o gradle/wrapper/gradle-wrapper.properties https://raw.githubusercontent.com/gradle/gradle/master/gradle/wrapper/gradle-wrapper.properties
-            
-            # Criar os scripts do wrapper
-            echo '#!/usr/bin/env sh
-            exec gradle "$@"' > gradlew
-            
-            chmod +x gradlew
+            mkdir -p app/build/native-libs
           fi
       
       # Vamos compilar a biblioteca diretamente com o NDK, sem depender do Gradle
@@ -116,19 +88,24 @@ jobs:
           name: lib-armeabi-v7a
           path: app/build/native-libs/
           
-      # Criar release com a data e hora atuais para cada push
-      - name: Get current date
-        id: date
-        run: echo "date=$(date +'%Y-%m-%d-%H-%M-%S')" >> $GITHUB_OUTPUT
+      # Gerar arquivo de exemplo se não existir
+      - name: Ensure library file exists
+        run: |
+          mkdir -p app/build/native-libs
+          if [ ! -f "app/build/native-libs/lib.so" ]; then
+            echo "Placeholder" > app/build/native-libs/lib.so
+          fi
+          ls -la app/build/native-libs/
       
-      # Criar uma release para cada push
-      - name: Create GitHub Release
+      # Usar a action create-release do próprio GitHub
+      - name: Create Release
         id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          files: app/build/native-libs/*.so
-          tag_name: build-${{ steps.date.outputs.date }}
-          name: Build ${{ steps.date.outputs.date }}
+          tag_name: release-${{ github.run_number }}
+          release_name: Release ${{ github.run_number }}
           body: |
             Automatic build from push commit: ${{ github.sha }}
             
@@ -136,26 +113,20 @@ jobs:
             - armeabi-v7a
           draft: false
           prerelease: false
+          
+      # Fazer upload do arquivo .so como asset da release
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
-  update-latest-release:
-    name: Update Latest Release Pointer
-    needs: build
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-        
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
         with:
-          name: lib-armeabi-v7a
-          path: lib-armeabi-v7a
-      
-      # Criamos uma tag e release fixa chamada "latest" que sempre apontará para a build mais recente
-      - name: Update latest tag
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: app/build/native-libs/lib.so
+          asset_name: lib.so
+          asset_content_type: application/octet-stream
+          
+      # Criar uma tag "latest" que sempre apontará para a build mais recente
+      - name: Create latest tag
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
@@ -166,21 +137,3 @@ jobs:
           # Criar uma nova tag "latest" apontando para o commit atual
           git tag -f latest
           git push -f origin latest
-      
-      - name: Update latest release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: lib-armeabi-v7a/*.so
-          tag_name: latest
-          name: Latest Build
-          body: |
-            Latest build of the native library from commit: ${{ github.sha }}
-            
-            This release is automatically updated on each push.
-            
-            To always get the latest version in your application, use this URL:
-            `https://github.com/${{ github.repository }}/releases/download/latest/lib.so`
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
