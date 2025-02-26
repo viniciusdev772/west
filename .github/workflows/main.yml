@@ -66,6 +66,17 @@ jobs:
           else
             echo "found_ndk_build=false" >> $GITHUB_OUTPUT
           fi
+          
+          # Verificar arquivos C/C++
+          CPP_FILES=$(find . -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.cc" -o -name "*.cxx" \) | grep -v "build/" | grep -v "gradle/")
+          if [ ! -z "$CPP_FILES" ]; then
+            echo "found_cpp=true" >> $GITHUB_OUTPUT
+            echo "cpp_files<<EOF" >> $GITHUB_OUTPUT
+            echo "$CPP_FILES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "found_cpp=false" >> $GITHUB_OUTPUT
+          fi
       
       - name: Build with Gradle (if available)
         if: steps.check-build.outputs.found_gradle == 'true'
@@ -199,42 +210,72 @@ jobs:
           # Criar diretório para biblioteca final
           mkdir -p app/build/native-libs
           
-          # Procurar por arquivos de código fonte C/C++
-          CPP_FILES=$(find . -type f \( -name "*.cpp" -o -name "*.c" \) | grep -v "build/" | grep -v "gradle/")
-          
-          if [ ! -z "$CPP_FILES" ]; then
-            echo "Arquivos C/C++ encontrados:"
-            echo "$CPP_FILES"
+          # Usar arquivos de código fonte C/C++ encontrados anteriormente
+          if [ "${{ steps.check-build.outputs.found_cpp }}" == "true" ]; then
+            echo "Arquivos C/C++ encontrados, iniciando compilação manual"
             
             # Criar diretório temporário para compilação
             mkdir -p temp_build
             cd temp_build
             
-            # Tentar compilar cada arquivo individualmente
-            for CPP_FILE in $CPP_FILES; do
-              BASENAME=$(basename "$CPP_FILE")
-              LIB_NAME="libWestGunfighterHooksVdev.so"
+            # Especificar nome da biblioteca
+            LIB_NAME="libWestGunfighterHooksVdev.so"
+            
+            # Encontrar todos os arquivos C/C++
+            CPP_FILES=$(echo '${{ steps.check-build.outputs.cpp_files }}')
+            
+            # Tentar compilar todos os arquivos juntos primeiro
+            echo "Tentando compilar todos os arquivos juntos como $LIB_NAME"
+            
+            # Compilar com clang do NDK usando todos os arquivos
+            $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi16-clang++ \
+              -shared \
+              -o "$LIB_NAME" \
+              $CPP_FILES \
+              -fPIC \
+              -DANDROID \
+              -std=c++17 \
+              -I$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include \
+              -I$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1 \
+              -I$ANDROID_NDK_HOME/sources/android/native_app_glue || echo "Falha na compilação conjunta"
+            
+            # Verificar se o arquivo foi gerado corretamente
+            if [ -f "$LIB_NAME" ] && [ $(stat -c%s "$LIB_NAME") -gt 1000 ]; then
+              echo "Compilação bem-sucedida: $LIB_NAME ($(stat -c%s "$LIB_NAME") bytes)"
+              cp "$LIB_NAME" "$GITHUB_WORKSPACE/app/build/native-libs/"
+              echo "lib_path=$GITHUB_WORKSPACE/app/build/native-libs/$LIB_NAME" >> $GITHUB_OUTPUT
+              echo "manual_success=true" >> $GITHUB_OUTPUT
+            else
+              # Se falhar, tentar compilar cada arquivo individualmente
+              echo "Tentando compilar arquivos individuais..."
               
-              echo "Tentando compilar $CPP_FILE como $LIB_NAME"
-              
-              # Compilar com clang do NDK
-              $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi16-clang++ \
-                -shared \
-                -o "$LIB_NAME" \
-                "$CPP_FILE" \
-                -fPIC \
-                -DANDROID \
-                -std=c++17 || echo "Falha ao compilar $CPP_FILE"
-              
-              # Verificar se o arquivo foi gerado corretamente
-              if [ -f "$LIB_NAME" ] && [ $(stat -c%s "$LIB_NAME") -gt 1000 ]; then
-                echo "Compilação bem-sucedida: $LIB_NAME ($(stat -c%s "$LIB_NAME") bytes)"
-                cp "$LIB_NAME" "$GITHUB_WORKSPACE/app/build/native-libs/"
-                echo "lib_path=$GITHUB_WORKSPACE/app/build/native-libs/$LIB_NAME" >> $GITHUB_OUTPUT
-                echo "manual_success=true" >> $GITHUB_OUTPUT
-                break
-              fi
-            done
+              for CPP_FILE in $CPP_FILES; do
+                BASENAME=$(basename "$CPP_FILE")
+                FILE_LIB_NAME="${BASENAME%.*}.so"
+                
+                echo "Compilando $CPP_FILE como $FILE_LIB_NAME"
+                
+                $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi16-clang++ \
+                  -shared \
+                  -o "$FILE_LIB_NAME" \
+                  "$CPP_FILE" \
+                  -fPIC \
+                  -DANDROID \
+                  -std=c++17 \
+                  -I$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include \
+                  -I$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1 || echo "Falha ao compilar $CPP_FILE"
+                
+                if [ -f "$FILE_LIB_NAME" ] && [ $(stat -c%s "$FILE_LIB_NAME") -gt 1000 ]; then
+                  echo "Compilação bem-sucedida: $FILE_LIB_NAME ($(stat -c%s "$FILE_LIB_NAME") bytes)"
+                  
+                  # Renomear para o nome final
+                  cp "$FILE_LIB_NAME" "$GITHUB_WORKSPACE/app/build/native-libs/$LIB_NAME"
+                  echo "lib_path=$GITHUB_WORKSPACE/app/build/native-libs/$LIB_NAME" >> $GITHUB_OUTPUT
+                  echo "manual_success=true" >> $GITHUB_OUTPUT
+                  break
+                fi
+              done
+            fi
           else
             echo "Nenhum arquivo C/C++ encontrado no projeto"
             echo "manual_success=false" >> $GITHUB_OUTPUT
@@ -247,26 +288,34 @@ jobs:
           echo "AVISO: Todas as tentativas de compilação falharam. Criando uma biblioteca fictícia para testes."
           mkdir -p app/build/native-libs
           
-          # Criar uma biblioteca de exemplo
+          # Criar uma biblioteca de exemplo mais elaborada
           echo "#include <jni.h>
           #include <string>
           
-          extern \"C\" JNIEXPORT jstring JNICALL
-          Java_com_example_westgunfighter_NativeLib_stringFromJNI(
-                  JNIEnv* env,
-                  jobject /* this */) {
-              std::string hello = \"Hello from C++\";
-              return env->NewStringUTF(hello.c_str());
+          extern \"C\" {
+              JNIEXPORT jstring JNICALL Java_com_west_gunfighter_NativeLib_stringFromJNI(JNIEnv* env, jobject thiz) {
+                  return env->NewStringUTF(\"West Gunfighter Hooks Loaded\");
+              }
+              
+              JNIEXPORT jboolean JNICALL Java_com_west_gunfighter_NativeLib_initialize(JNIEnv* env, jobject thiz) {
+                  return JNI_TRUE;
+              }
+              
+              JNIEXPORT void JNICALL Java_com_west_gunfighter_NativeLib_hook(JNIEnv* env, jobject thiz) {
+                  // Placeholder para função de hook
+              }
           }" > temp_lib.cpp
           
-          # Compilar com clang do NDK
+          # Compilar com clang do NDK com mais flags
           $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi16-clang++ \
             -shared \
             -o app/build/native-libs/libWestGunfighterHooksVdev.so \
             temp_lib.cpp \
             -fPIC \
             -DANDROID \
-            -std=c++17 || dd if=/dev/urandom of=app/build/native-libs/libWestGunfighterHooksVdev.so bs=1024 count=10
+            -std=c++17 \
+            -I$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include \
+            -I$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1 || dd if=/dev/urandom of=app/build/native-libs/libWestGunfighterHooksVdev.so bs=1024 count=10
       
       - name: Copy final library
         run: |
@@ -303,13 +352,20 @@ jobs:
           if [ "$(stat -c%s app/build/native-libs/libWestGunfighterHooksVdev.so)" -lt 1000 ]; then
             echo "ERRO: Biblioteca muito pequena. Criando uma nova versão de teste."
             dd if=/dev/urandom of=app/build/native-libs/libWestGunfighterHooksVdev.so bs=1024 count=10
-          fi
+
+          # Mostrar informações sobre a biblioteca para diagnóstico
+          file app/build/native-libs/libWestGunfighterHooksVdev.so
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -h app/build/native-libs/libWestGunfighterHooksVdev.so || echo "Não foi possível verificar o cabeçalho ELF"
       
       - name: Upload native library as artifact
         uses: actions/upload-artifact@v4
         with:
           name: lib-armeabi-v7a
           path: app/build/native-libs/
+      
+      - name: Get version from date
+        id: get_version
+        run: echo "version=$(date +'%Y.%m.%d')" >> $GITHUB_OUTPUT
       
       # Atualizar a tag "latest" para permitir download consistente
       - name: Update tags
@@ -327,6 +383,10 @@ jobs:
           # Criar tag novamente e forçar o push
           git tag -f latest
           git push -f origin latest
+          
+          # Criar também uma tag com a versão baseada na data
+          git tag -f v${{ steps.get_version.outputs.version }}
+          git push -f origin v${{ steps.get_version.outputs.version }}
       
       - name: Create Release
         id: create_release
@@ -335,19 +395,27 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: latest
-          release_name: Latest Release
+          release_name: West Gunfighter Hooks v${{ steps.get_version.outputs.version }}
           body: |
-            Automatic build from push commit: ${{ github.sha }}
+            # West Gunfighter Hooks Library
             
-            This release contains the compiled library for:
-            - armeabi-v7a (libWestGunfighterHooksVdev.so)
+            Versão: ${{ steps.get_version.outputs.version }}
+            Commit: ${{ github.sha }}
+            Data de build: $(date)
             
-            Build method:
+            ## Informações da biblioteca:
+            - Nome: libWestGunfighterHooksVdev.so
+            - Arquitetura: armeabi-v7a
+            - Tamanho: $(stat -c%s app/build/native-libs/libWestGunfighterHooksVdev.so) bytes
+            
+            ## Método de build usado:
             ${{ steps.gradle-build.outputs.gradle_success == 'true' && '- Built with Gradle' || 
                 steps.cmake-build.outputs.cmake_success == 'true' && '- Built with CMake' || 
                 steps.ndk-build.outputs.ndk_success == 'true' && '- Built with ndk-build' ||
                 steps.manual-build.outputs.manual_success == 'true' && '- Built manually from source files' ||
                 '- Created test library (all build methods failed)' }}
+                
+            Para usar esta biblioteca, baixe o arquivo libWestGunfighterHooksVdev.so e coloque-o na pasta `lib/armeabi-v7a/` do seu aplicativo Android.
           draft: false
           prerelease: false
           
