@@ -12,8 +12,6 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup JDK
         uses: actions/setup-java@v4
@@ -21,34 +19,17 @@ jobs:
           java-version: 17
           distribution: temurin
 
-      # Recria o Gradle Wrapper completamente
-      - name: Setup Gradle Wrapper
+      # Instalar Gradle diretamente em vez de usar o wrapper
+      - name: Install Gradle
         run: |
-          # Remove arquivos potencialmente corrompidos
-          rm -rf gradle
-          rm -f gradlew
-          rm -f gradlew.bat
+          sudo apt-get update
+          sudo apt-get install -y gradle
+          gradle --version
 
-          # Cria novo diretório para o wrapper
-          mkdir -p gradle/wrapper
-
-          # Baixa arquivos essenciais do Gradle Wrapper
-          wget -O gradle/wrapper/gradle-wrapper.jar https://github.com/gradle/gradle/raw/master/gradle/wrapper/gradle-wrapper.jar
-          wget -O gradle/wrapper/gradle-wrapper.properties https://github.com/gradle/gradle/raw/master/gradle/wrapper/gradle-wrapper.properties
-          wget -O gradlew https://github.com/gradle/gradle/raw/master/gradlew
-          wget -O gradlew.bat https://github.com/gradle/gradle/raw/master/gradlew.bat
-
-          # Torna o script executável
-          chmod +x gradlew
-
-      # Executa o Gradle com um comando mais básico
+      # Compilar usando o Gradle instalado no sistema
       - name: Build Native Libraries
         run: |
-          # Verifica se o Gradle Wrapper está funcionando
-          ./gradlew -v
-
-          # Tenta compilar as bibliotecas nativas
-          ./gradlew :app:externalNativeBuildDebug
+          gradle :app:externalNativeBuildDebug --no-daemon
 
       - name: Collect Native Libraries
         run: |
