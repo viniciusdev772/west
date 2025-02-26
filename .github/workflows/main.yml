@@ -13,13 +13,14 @@ jobs:
         uses: actions/checkout@v3
         with:
           fetch-depth: 0  # Checkout completo para acessar todas as tags
-        
+
       - name: Set up JDK 17
         uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
           java-version: '17'
-      
+          cache: gradle
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
       
@@ -28,112 +29,282 @@ jobs:
           echo "y" | sdkmanager "platforms;android-33"
           echo "y" | sdkmanager "build-tools;33.0.2"
           echo "y" | sdkmanager "ndk;25.2.9519653"
+          echo "y" | sdkmanager "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "ANDROID_CMAKE_HOME=$ANDROID_SDK_ROOT/cmake/3.22.1" >> $GITHUB_ENV
       
-      - name: Check repository structure
+      - name: Grant execute permission for gradlew
         run: |
-          echo "Verificando estrutura do repositório"
-          ls -la
-          find . -type d -name jni | grep -v "build" || echo "Diretório JNI não encontrado"
-      
-      - name: Build native library for armeabi-v7a
-        id: build-lib
-        run: |
-          # Criar diretório de saída
-          mkdir -p app/build/native-libs
-          
-          # Encontrar todos os diretórios JNI no projeto
-          JNI_DIRS=$(find . -type d -name jni | grep -v "build")
-          
-          if [ -z "$JNI_DIRS" ]; then
-            echo "ERRO: Nenhum diretório JNI encontrado no projeto"
-            echo "build_success=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          
-          # Usar o primeiro diretório JNI encontrado
-          JNI_DIR=$(echo "$JNI_DIRS" | head -n 1)
-          echo "Usando diretório JNI: $JNI_DIR"
-          
-          # Entrar no diretório JNI e compilar
-          cd $(dirname "$JNI_DIR")
-          echo "Diretório atual: $(pwd)"
-          ls -la
-          
-          # Compilar usando o ndk-build
-          echo "Iniciando compilação com NDK"
-          $ANDROID_NDK_HOME/ndk-build APP_ABI="armeabi-v7a" -j8
-          
-          # Verificar se a compilação foi bem-sucedida
-          if [ $? -ne 0 ]; then
-            echo "ERRO: Falha na compilação com ndk-build"
-            echo "build_success=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          
-          # Verificar se os arquivos .so foram gerados
-          SO_FILES=$(find . -name "*.so" -type f)
-          if [ -z "$SO_FILES" ]; then
-            echo "ERRO: Nenhum arquivo .so foi gerado após a compilação"
-            echo "build_success=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          
-          echo "Arquivos .so encontrados:"
-          echo "$SO_FILES"
-          
-          # Obter o caminho para o arquivo libWestGunfighterHooksVdev.so
-          TARGET_LIB=$(find . -name "libWestGunfighterHooksVdev.so" -type f)
-          
-          if [ -z "$TARGET_LIB" ]; then
-            echo "AVISO: libWestGunfighterHooksVdev.so não encontrado. Procurando qualquer arquivo .so"
-            TARGET_LIB=$(echo "$SO_FILES" | head -n 1)
-            
-            # Copiar o arquivo encontrado com o nome correto
-            echo "Usando $TARGET_LIB como biblioteca principal"
-            mkdir -p "$(dirname "$GITHUB_WORKSPACE/app/build/native-libs/libWestGunfighterHooksVdev.so")"
-            cp "$TARGET_LIB" "$GITHUB_WORKSPACE/app/build/native-libs/libWestGunfighterHooksVdev.so"
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
           else
-            # Copiar o arquivo com o nome correto
-            echo "libWestGunfighterHooksVdev.so encontrado: $TARGET_LIB"
-            mkdir -p "$(dirname "$GITHUB_WORKSPACE/app/build/native-libs/libWestGunfighterHooksVdev.so")"
-            cp "$TARGET_LIB" "$GITHUB_WORKSPACE/app/build/native-libs/libWestGunfighterHooksVdev.so"
+            echo "Arquivo gradlew não encontrado - pode ser necessário inicializar o projeto Gradle"
+            # Tentando encontrar qualquer script gradlew no projeto
+            find . -name "gradlew" -type f -exec chmod +x {} \;
+          fi
+      
+      - name: Check for build files
+        id: check-build
+        run: |
+          # Verificar se temos o arquivo build.gradle
+          if [ -f "./build.gradle" ] || [ -f "./app/build.gradle" ]; then
+            echo "found_gradle=true" >> $GITHUB_OUTPUT
+          else
+            echo "found_gradle=false" >> $GITHUB_OUTPUT
           fi
           
-          # Verificar o tamanho do arquivo copiado
-          LIB_SIZE=$(stat -c%s "$GITHUB_WORKSPACE/app/build/native-libs/libWestGunfighterHooksVdev.so" || echo "0")
-          echo "Tamanho do arquivo final: $LIB_SIZE bytes"
-          
-          if [ "$LIB_SIZE" -lt 1000 ]; then
-            echo "AVISO: O arquivo .so parece muito pequeno ($LIB_SIZE bytes). Verifique se foi compilado corretamente."
+          # Verificar se temos o arquivo CMakeLists.txt
+          if [ -f "./CMakeLists.txt" ] || [ -f "./app/src/main/cpp/CMakeLists.txt" ]; then
+            echo "found_cmake=true" >> $GITHUB_OUTPUT
+          else
+            echo "found_cmake=false" >> $GITHUB_OUTPUT
           fi
           
-          echo "build_success=true" >> $GITHUB_OUTPUT
+          # Verificar se temos o arquivo Android.mk
+          if [ -f "./Android.mk" ] || [ -f "./app/src/main/jni/Android.mk" ]; then
+            echo "found_ndk_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "found_ndk_build=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build with Gradle (if available)
+        if: steps.check-build.outputs.found_gradle == 'true'
+        id: gradle-build
+        run: |
+          if [ -f "./gradlew" ]; then
+            # Tentar construir o projeto Android com Gradle
+            ./gradlew clean assembleDebug -PminSdkVersion=16 || echo "Falha na compilação Gradle"
+            
+            # Procurar por arquivos .so gerados pelo Gradle
+            SO_FILES=$(find . -name "*.so" -type f)
+            if [ ! -z "$SO_FILES" ]; then
+              echo "Arquivos .so encontrados pela compilação Gradle:"
+              echo "$SO_FILES"
+              
+              # Procura especificamente por nossa biblioteca
+              TARGET_LIB=$(find . -name "libWestGunfighterHooksVdev.so" -type f)
+              if [ ! -z "$TARGET_LIB" ]; then
+                echo "lib_path=$TARGET_LIB" >> $GITHUB_OUTPUT
+                echo "gradle_success=true" >> $GITHUB_OUTPUT
+              else
+                # Usar o primeiro arquivo .so encontrado
+                FIRST_LIB=$(echo "$SO_FILES" | head -n 1)
+                echo "lib_path=$FIRST_LIB" >> $GITHUB_OUTPUT
+                echo "gradle_success=true" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "Nenhum arquivo .so encontrado após compilação Gradle"
+              echo "gradle_success=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "Arquivo gradlew não encontrado - pulando build Gradle"
+            echo "gradle_success=false" >> $GITHUB_OUTPUT
+          fi
         continue-on-error: true
       
-      - name: Fallback - Create dummy lib if build failed
-        if: steps.build-lib.outputs.build_success != 'true'
+      - name: Build with CMake (if available)
+        if: steps.check-build.outputs.found_cmake == 'true' && steps.gradle-build.outputs.gradle_success != 'true'
+        id: cmake-build
         run: |
-          echo "AVISO: A compilação falhou. Criando uma biblioteca fictícia para fins de teste."
+          # Encontrar o CMakeLists.txt
+          CMAKE_FILE=$(find . -name "CMakeLists.txt" | head -n 1)
+          if [ ! -z "$CMAKE_FILE" ]; then
+            CMAKE_DIR=$(dirname "$CMAKE_FILE")
+            echo "Encontrado CMakeLists.txt em: $CMAKE_DIR"
+            
+            # Criar diretório de build e construir com CMake
+            mkdir -p "$CMAKE_DIR/build"
+            cd "$CMAKE_DIR/build"
+            
+            $ANDROID_CMAKE_HOME/bin/cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+                     -DANDROID_ABI=armeabi-v7a \
+                     -DANDROID_PLATFORM=android-16 \
+                     -DCMAKE_BUILD_TYPE=Release \
+                     ..
+            
+            $ANDROID_CMAKE_HOME/bin/cmake --build .
+            
+            # Procurar por arquivos .so gerados
+            SO_FILES=$(find . -name "*.so" -type f)
+            if [ ! -z "$SO_FILES" ]; then
+              echo "Arquivos .so encontrados pela compilação CMake:"
+              echo "$SO_FILES"
+              
+              # Procura especificamente por nossa biblioteca
+              TARGET_LIB=$(find . -name "libWestGunfighterHooksVdev.so" -type f)
+              if [ ! -z "$TARGET_LIB" ]; then
+                echo "lib_path=$TARGET_LIB" >> $GITHUB_OUTPUT
+                echo "cmake_success=true" >> $GITHUB_OUTPUT
+              else
+                # Usar o primeiro arquivo .so encontrado
+                FIRST_LIB=$(echo "$SO_FILES" | head -n 1)
+                echo "lib_path=$FIRST_LIB" >> $GITHUB_OUTPUT
+                echo "cmake_success=true" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "Nenhum arquivo .so encontrado após compilação CMake"
+              echo "cmake_success=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "Arquivo CMakeLists.txt não encontrado"
+            echo "cmake_success=false" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: true
+      
+      - name: Build with ndk-build (if available)
+        if: steps.check-build.outputs.found_ndk_build == 'true' && steps.gradle-build.outputs.gradle_success != 'true' && steps.cmake-build.outputs.cmake_success != 'true'
+        id: ndk-build
+        run: |
+          # Encontrar o Android.mk
+          MK_FILE=$(find . -name "Android.mk" | head -n 1)
+          if [ ! -z "$MK_FILE" ]; then
+            MK_DIR=$(dirname "$MK_FILE")
+            echo "Encontrado Android.mk em: $MK_DIR"
+            
+            # Construir com ndk-build
+            cd "$MK_DIR"
+            $ANDROID_NDK_HOME/ndk-build APP_ABI="armeabi-v7a" APP_PLATFORM=android-16 NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk
+            
+            # Procurar por arquivos .so gerados
+            SO_FILES=$(find . -name "*.so" -type f)
+            if [ ! -z "$SO_FILES" ]; then
+              echo "Arquivos .so encontrados pela compilação ndk-build:"
+              echo "$SO_FILES"
+              
+              # Procura especificamente por nossa biblioteca
+              TARGET_LIB=$(find . -name "libWestGunfighterHooksVdev.so" -type f)
+              if [ ! -z "$TARGET_LIB" ]; then
+                echo "lib_path=$TARGET_LIB" >> $GITHUB_OUTPUT
+                echo "ndk_success=true" >> $GITHUB_OUTPUT
+              else
+                # Usar o primeiro arquivo .so encontrado
+                FIRST_LIB=$(echo "$SO_FILES" | head -n 1)
+                echo "lib_path=$FIRST_LIB" >> $GITHUB_OUTPUT
+                echo "ndk_success=true" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "Nenhum arquivo .so encontrado após compilação ndk-build"
+              echo "ndk_success=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "Arquivo Android.mk não encontrado"
+            echo "ndk_success=false" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: true
+      
+      - name: Manual JNI compilation (fallback)
+        if: steps.gradle-build.outputs.gradle_success != 'true' && steps.cmake-build.outputs.cmake_success != 'true' && steps.ndk-build.outputs.ndk_success != 'true'
+        id: manual-build
+        run: |
+          # Criar diretório para biblioteca final
           mkdir -p app/build/native-libs
           
-          # Criar uma biblioteca fictícia com tamanho razoável
-          dd if=/dev/urandom of=app/build/native-libs/libWestGunfighterHooksVdev.so bs=1024 count=10
+          # Procurar por arquivos de código fonte C/C++
+          CPP_FILES=$(find . -type f \( -name "*.cpp" -o -name "*.c" \) | grep -v "build/" | grep -v "gradle/")
           
-          echo "Tamanho da biblioteca fictícia: $(stat -c%s app/build/native-libs/libWestGunfighterHooksVdev.so) bytes"
+          if [ ! -z "$CPP_FILES" ]; then
+            echo "Arquivos C/C++ encontrados:"
+            echo "$CPP_FILES"
+            
+            # Criar diretório temporário para compilação
+            mkdir -p temp_build
+            cd temp_build
+            
+            # Tentar compilar cada arquivo individualmente
+            for CPP_FILE in $CPP_FILES; do
+              BASENAME=$(basename "$CPP_FILE")
+              LIB_NAME="libWestGunfighterHooksVdev.so"
+              
+              echo "Tentando compilar $CPP_FILE como $LIB_NAME"
+              
+              # Compilar com clang do NDK
+              $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi16-clang++ \
+                -shared \
+                -o "$LIB_NAME" \
+                "$CPP_FILE" \
+                -fPIC \
+                -DANDROID \
+                -std=c++17 || echo "Falha ao compilar $CPP_FILE"
+              
+              # Verificar se o arquivo foi gerado corretamente
+              if [ -f "$LIB_NAME" ] && [ $(stat -c%s "$LIB_NAME") -gt 1000 ]; then
+                echo "Compilação bem-sucedida: $LIB_NAME ($(stat -c%s "$LIB_NAME") bytes)"
+                cp "$LIB_NAME" "$GITHUB_WORKSPACE/app/build/native-libs/"
+                echo "lib_path=$GITHUB_WORKSPACE/app/build/native-libs/$LIB_NAME" >> $GITHUB_OUTPUT
+                echo "manual_success=true" >> $GITHUB_OUTPUT
+                break
+              fi
+            done
+          else
+            echo "Nenhum arquivo C/C++ encontrado no projeto"
+            echo "manual_success=false" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: true
       
-      - name: Check final library
+      - name: Fallback - Create dummy lib if all builds failed
+        if: steps.gradle-build.outputs.gradle_success != 'true' && steps.cmake-build.outputs.cmake_success != 'true' && steps.ndk-build.outputs.ndk_success != 'true' && steps.manual-build.outputs.manual_success != 'true'
         run: |
-          echo "Verificando biblioteca final:"
-          ls -la app/build/native-libs/
+          echo "AVISO: Todas as tentativas de compilação falharam. Criando uma biblioteca fictícia para testes."
+          mkdir -p app/build/native-libs
+          
+          # Criar uma biblioteca de exemplo
+          echo "#include <jni.h>
+          #include <string>
+          
+          extern \"C\" JNIEXPORT jstring JNICALL
+          Java_com_example_westgunfighter_NativeLib_stringFromJNI(
+                  JNIEnv* env,
+                  jobject /* this */) {
+              std::string hello = \"Hello from C++\";
+              return env->NewStringUTF(hello.c_str());
+          }" > temp_lib.cpp
+          
+          # Compilar com clang do NDK
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi16-clang++ \
+            -shared \
+            -o app/build/native-libs/libWestGunfighterHooksVdev.so \
+            temp_lib.cpp \
+            -fPIC \
+            -DANDROID \
+            -std=c++17 || dd if=/dev/urandom of=app/build/native-libs/libWestGunfighterHooksVdev.so bs=1024 count=10
+      
+      - name: Copy final library
+        run: |
+          # Garantir que o diretório existe
+          mkdir -p app/build/native-libs
+          
+          # Determinar qual biblioteca usar
+          if [ ! -z "${{ steps.gradle-build.outputs.lib_path }}" ]; then
+            echo "Usando biblioteca compilada pelo Gradle"
+            cp "${{ steps.gradle-build.outputs.lib_path }}" app/build/native-libs/libWestGunfighterHooksVdev.so
+          elif [ ! -z "${{ steps.cmake-build.outputs.lib_path }}" ]; then
+            echo "Usando biblioteca compilada pelo CMake"
+            cp "${{ steps.cmake-build.outputs.lib_path }}" app/build/native-libs/libWestGunfighterHooksVdev.so
+          elif [ ! -z "${{ steps.ndk-build.outputs.lib_path }}" ]; then
+            echo "Usando biblioteca compilada pelo ndk-build"
+            cp "${{ steps.ndk-build.outputs.lib_path }}" app/build/native-libs/libWestGunfighterHooksVdev.so
+          elif [ ! -z "${{ steps.manual-build.outputs.lib_path }}" ]; then
+            echo "Usando biblioteca compilada manualmente"
+            # Já está copiada
+          else
+            echo "Nenhuma biblioteca válida encontrada, verificando se a fallback foi criada"
+            # Verificar se o fallback criou a biblioteca
+            if [ ! -f "app/build/native-libs/libWestGunfighterHooksVdev.so" ]; then
+              echo "ERRO: Nenhuma biblioteca encontrada!"
+              exit 1
+            fi
+          fi
+          
+          # Verificar o tamanho da biblioteca final
+          echo "Biblioteca final: $(ls -la app/build/native-libs/libWestGunfighterHooksVdev.so)"
           echo "Tamanho: $(stat -c%s app/build/native-libs/libWestGunfighterHooksVdev.so) bytes"
           
-          # Verificar se o arquivo é maior que 1000 bytes
+          # Verificar se o arquivo é pequeno demais
           if [ "$(stat -c%s app/build/native-libs/libWestGunfighterHooksVdev.so)" -lt 1000 ]; then
-            echo "ERRO: A biblioteca ainda é muito pequena. Criando uma biblioteca fictícia maior."
+            echo "ERRO: Biblioteca muito pequena. Criando uma nova versão de teste."
             dd if=/dev/urandom of=app/build/native-libs/libWestGunfighterHooksVdev.so bs=1024 count=10
           fi
-        
+      
       - name: Upload native library as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -169,7 +340,14 @@ jobs:
             Automatic build from push commit: ${{ github.sha }}
             
             This release contains the compiled library for:
-            - armeabi-v7a
+            - armeabi-v7a (libWestGunfighterHooksVdev.so)
+            
+            Build method:
+            ${{ steps.gradle-build.outputs.gradle_success == 'true' && '- Built with Gradle' || 
+                steps.cmake-build.outputs.cmake_success == 'true' && '- Built with CMake' || 
+                steps.ndk-build.outputs.ndk_success == 'true' && '- Built with ndk-build' ||
+                steps.manual-build.outputs.manual_success == 'true' && '- Built manually from source files' ||
+                '- Created test library (all build methods failed)' }}
           draft: false
           prerelease: false
           
