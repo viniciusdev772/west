@@ -34,29 +34,111 @@ jobs:
           sdkmanager --install "ndk;25.2.9519653"
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/25.2.9519653" >> $GITHUB_ENV
       
+      - name: Fix build files
+        run: |
+          cd app/src/main/jni
+          
+          # Exibir o conteúdo do Android.mk para depuração
+          echo "Conteúdo do Android.mk:"
+          cat Android.mk
+          
+          # Exibir o conteúdo do Application.mk para depuração
+          echo "Conteúdo do Application.mk:"
+          cat Application.mk
+          
+          # Ajustar o Android.mk para corrigir o erro "multiple target patterns"
+          # Normalmente isso ocorre quando há targets conflitantes ou quando
+          # há caracteres especiais mal escapados
+          
+          # Vamos fazer um backup do Android.mk original
+          cp Android.mk Android.mk.bak
+          
+          # Simplificar o Android.mk para tentar resolver o problema
+          cat > Android.mk << 'EOF'
+          LOCAL_PATH := $(call my-dir)
+          include $(CLEAR_VARS)
+
+          # Nome da biblioteca
+          LOCAL_MODULE    := WestGunfighterHooksVdev
+
+          # Todos os arquivos fonte
+          LOCAL_SRC_FILES := Main.cpp \
+               Substrate/hde64.c \
+               Substrate/SubstrateDebug.cpp \
+               Substrate/SubstrateHook.cpp \
+               Substrate/SubstratePosixMemory.cpp \
+               Substrate/SymbolFinder.cpp \
+               KittyMemory/KittyMemory.cpp \
+               KittyMemory/MemoryPatch.cpp \
+               KittyMemory/MemoryBackup.cpp \
+               KittyMemory/KittyUtils.cpp \
+               And64InlineHook/And64InlineHook.cpp
+
+          # Bibliotecas
+          LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv2 -lz
+
+          # Include paths
+          LOCAL_C_INCLUDES += $(LOCAL_PATH) \
+                            $(LOCAL_PATH)/Includes \
+                            $(LOCAL_PATH)/src/include
+
+          # Flags de compilação
+          LOCAL_CFLAGS := -w -s -Wno-error=format-security -fvisibility=hidden -fpermissive -fexceptions
+          LOCAL_CPPFLAGS := -w -s -Wno-error=format-security -fvisibility=hidden -Werror -std=c++17
+          LOCAL_CPPFLAGS += -Wno-error=c++11-narrowing -fpermissive -Wall -fexceptions
+          LOCAL_LDFLAGS += -Wl,--gc-sections,--strip-all,-llog
+
+          include $(BUILD_SHARED_LIBRARY)
+          EOF
+          
+          # Simplificar o Application.mk para garantir compatibilidade
+          cat > Application.mk << 'EOF'
+          APP_ABI := armeabi-v7a
+          APP_PLATFORM := android-21
+          APP_STL := c++_static
+          APP_OPTIM := release
+          APP_THIN_ARCHIVE := true
+          APP_PIE := true
+          EOF
+          
       - name: Build native library
         run: |
           cd app/src/main/jni
           
           # Verificar arquivos existentes
-          echo "Arquivos na pasta jni:"
+          echo "Arquivos na pasta jni após ajustes:"
           ls -la
           
-          # Compilar com ndk-build
-          ${ANDROID_NDK_HOME}/ndk-build APP_ABI="armeabi-v7a" V=1
+          # Compilar com ndk-build com mais flags de depuração
+          ${ANDROID_NDK_HOME}/ndk-build APP_ABI="armeabi-v7a" V=1 NDK_DEBUG=1
+          
+          # Se falhar com ndk-build, tentar com o path alternativo
+          if [ $? -ne 0 ]; then
+            echo "Tentando path alternativo do ndk-build..."
+            find ${ANDROID_NDK_HOME} -name "ndk-build" -type f -executable
+            
+            # Usar o binário ndk-build encontrado
+            NDK_BUILD=$(find ${ANDROID_NDK_HOME} -name "ndk-build" -type f -executable | head -1)
+            if [ ! -z "$NDK_BUILD" ]; then
+              echo "Usando ndk-build em: $NDK_BUILD"
+              $NDK_BUILD APP_ABI="armeabi-v7a" V=1 NDK_DEBUG=1
+            else
+              echo "ndk-build não encontrado!"
+              exit 1
+            fi
+          fi
           
           # Verificar se o build foi gerado
           if [ -d "../libs/armeabi-v7a" ]; then
             echo "Arquivos compilados:"
             ls -la ../libs/armeabi-v7a
+            mkdir -p ../../../build/native-libs
+            cp -R ../libs/armeabi-v7a/* ../../../build/native-libs/
+            echo "Bibliotecas copiadas para diretório de saída."
           else
             echo "Erro: Falha na compilação. Diretório de saída não encontrado."
             exit 1
           fi
-          
-          # Criar diretório para output
-          mkdir -p ../../../build/native-libs
-          cp -R ../libs/armeabi-v7a/* ../../../build/native-libs/
       
       - name: Upload native library as artifact
         uses: actions/upload-artifact@v4
