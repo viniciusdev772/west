@@ -38,30 +38,36 @@ jobs:
       
       - name: Build native library for armeabi-v7a
         run: |
+          set -e
           if [ -d "app/src/main/jni" ]; then
             cd app/src/main/jni
             export PATH=$ANDROID_NDK_HOME:$PATH
             echo "NDK path: $ANDROID_NDK_HOME"
-            $ANDROID_NDK_HOME/ndk-build APP_ABI="armeabi-v7a" -j8 || echo "Falha ao compilar com ndk-build"
+            $ANDROID_NDK_HOME/ndk-build APP_ABI="armeabi-v7a" -j8 || (echo "Falha ao compilar com ndk-build" && exit 1)
             mkdir -p ../../../build/native-libs
             find ../libs -type f -name "*.so"
             if [ -d "../libs/armeabi-v7a" ]; then
-              mv ../libs/armeabi-v7a/* ../../../build/native-libs/
+              cp -R ../libs/armeabi-v7a/* ../../../build/native-libs/
             fi
           fi
         
+      - name: Verify compiled library
+        run: |
+          echo "Verificando se lib.so foi gerada corretamente"
+          find app/build/native-libs/ -type f -name "*.so"
+          if [ ! -f "app/build/native-libs/lib.so" ]; then
+            echo "Erro: Nenhum arquivo lib.so encontrado!" && exit 1
+          fi
+      
       - name: Upload native library as artifact
         uses: actions/upload-artifact@v4
         with:
           name: lib-armeabi-v7a
           path: app/build/native-libs/
-      
-      - name: Ensure library file exists
-        run: |
-          if [ ! -f "app/build/native-libs/lib.so" ]; then
-            echo "Erro: Nenhum arquivo lib.so encontrado!" && exit 1
-          fi
-          ls -la app/build/native-libs/
+          if-no-files-found: warn
+          compression-level: 6
+          overwrite: false
+          include-hidden-files: false
       
       - name: Create Release
         id: create_release
