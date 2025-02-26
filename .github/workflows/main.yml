@@ -73,36 +73,34 @@ jobs:
       - name: Ensure library file exists
         run: |
           mkdir -p app/build/native-libs
-          if [ ! -f "app/build/native-libs/lib.so" ]; then
-            echo "Placeholder" > app/build/native-libs/lib.so
+          # Garantir que o arquivo com nome correto existe para o download
+          if [ ! -f "app/build/native-libs/libWestGunfighterHooksVdev.so" ]; then
+            if [ -f "app/build/native-libs/lib.so" ]; then
+              # Usar o arquivo placeholder renomeando-o
+              cp app/build/native-libs/lib.so app/build/native-libs/libWestGunfighterHooksVdev.so
+            else
+              # Criar placeholder com o nome correto
+              echo "Placeholder" > app/build/native-libs/libWestGunfighterHooksVdev.so
+            fi
           fi
           ls -la app/build/native-libs/
       
-      # Verificar se a tag "release" existe, excluí-la e recriar as tags
-      - name: Check and update tags
+      # Atualizar a tag "latest" para permitir download consistente
+      - name: Update tags
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           
-          # Verificar se a tag release existe
-          if git rev-parse --verify refs/tags/release >/dev/null 2>&1; then
-            echo "A tag 'release' existe. Excluindo..."
-            git tag -d release
-            git push origin :refs/tags/release
-          fi
+          # Sempre usar a tag "latest" para permitir URLs de download consistentes
+          # Remover localmente primeiro (se existir)
+          git tag -d latest 2>/dev/null || true
           
-          # Verificar se a tag latest existe
-          if git rev-parse --verify refs/tags/latest >/dev/null 2>&1; then
-            echo "A tag 'latest' existe. Excluindo..."
-            git tag -d latest
-            git push origin :refs/tags/latest
-          fi
+          # Remover remotamente (se existir)
+          git push --delete origin latest 2>/dev/null || true
           
-          # Criar as tags novamente
+          # Criar tag novamente e forçar o push
           git tag -f latest
-          git tag -f release
           git push -f origin latest
-          git push -f origin release
       
       - name: Create Release
         id: create_release
@@ -110,7 +108,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: release
+          tag_name: latest
           release_name: Latest Release
           body: |
             Automatic build from push commit: ${{ github.sha }}
