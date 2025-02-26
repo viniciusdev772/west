@@ -23,6 +23,7 @@
 
 bool feature2, featureHookToggle, Health, UnlockArmas, LevelMaximo;
 int sliderValue = 1, level = 0, Moedas = 0, Gems = 0;
+bool MatarTodosInimigos = false;
 void *instanceBtn;
 struct MyPlayerRealtimeData {
     int maxBlood;    // Assumindo que maxBlood está no offset 0x8
@@ -112,6 +113,87 @@ MyPlayerRealtimeData *hook_GetMyPlayerRealtimeData() {
                         "Valores modificados: maxBlood=%d, currentBlood=%d", *maxBloodPtr,
                         *currentBloodPtr);
     return data;
+}
+
+
+// Estrutura para List<T> similar à do Unity/IL2CPP
+struct Il2CppArray {
+    void* klass;
+    void* monitor;
+    void* bounds;
+    int   max_length;
+    void* vector[0];
+};
+
+struct List_PlayerBase {
+    void* klass;
+    void* monitor;
+    Il2CppArray* _items;
+    int _size;
+    int _version;
+    void* _syncRoot;
+};
+int getListSize(void* list) {
+    if (list == NULL) return 0;
+    List_PlayerBase* typedList = (List_PlayerBase*)list;
+    return typedList->_size;
+}
+
+// Função para obter um item de uma lista
+void* getListItem(void* list, int index) {
+    if (list == NULL) return NULL;
+    List_PlayerBase* typedList = (List_PlayerBase*)list;
+    if (index < 0 || index >= typedList->_size || typedList->_items == NULL) return NULL;
+    return typedList->_items->vector[index];
+}
+void* getPlayerRealtimeData(void* player) {
+    if (player == NULL) return NULL;
+
+    // Baseado no código, parece que poderíamos precisar chamar um método como GetMyPlayerRealtimeData
+    // Vamos assumir que este método está em um offset conhecido ou acessível via vtable
+
+    // Abordagem 1: Se houver um campo direto para realtimeData
+    return *(void**)((uint64_t)player + 0x48); // Offset hipotético, ajuste conforme necessário
+
+    // Abordagem 2: Se precisar chamar um método
+    // return ((void* (*)(void*))getAbsoluteAddress(targetLibName, 0x490C28))(player);
+}
+void matarTodosOsInimigos() {
+    if (!MatarTodosInimigos) return;
+
+    // Obter GameCtrl instance
+    void* gameCtrl = ((void* (*)())getAbsoluteAddress(targetLibName, 0x2DDD44))();
+    if (!gameCtrl) return;
+
+    // Obter lista de inimigos ativos
+    void* enemyList = ((void* (*)(void*))getAbsoluteAddress(targetLibName, 0x2F1D7C))(gameCtrl);
+    if (!enemyList) return;
+
+    LOGI(OBFUSCATE("Obtendo lista de inimigos"));
+
+    int count = getListSize(enemyList);
+    LOGI(OBFUSCATE("Número de inimigos: %d"), count);
+
+    for (int i = 0; i < count; i++) {
+        void* enemy = getListItem(enemyList, i);
+        if (enemy) {
+            LOGI(OBFUSCATE("Processando inimigo %d"), i);
+
+            // Definir saúde como 0 para matar
+            void* realtimeData = getPlayerRealtimeData(enemy);
+            if (realtimeData) {
+                LOGI(OBFUSCATE("Definindo vida como 0"));
+                *(int*)((uint64_t)realtimeData + 0xC) = 0; // currentBlood = 0
+
+                // Forçar animação de morte
+                // Isso invoca diretamente a função de morte do inimigo (PlayReadyToDie_Player)
+                LOGI(OBFUSCATE("Invocando animação de morte"));
+                ((void (*)(void*))getAbsoluteAddress(targetLibName, 0x456BD8))(enemy);
+            }
+        }
+    }
+
+    LOGI(OBFUSCATE("Todos os inimigos foram eliminados"));
 }
 
 
@@ -261,6 +343,7 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("2_InputValue_Adicionar Moedas"),
             OBFUSCATE("3_InputValue_Adicionar Gems"),
             OBFUSCATE("5_SeekBar_Balas das Armas_1_999999"),
+            OBFUSCATE("6_Toggle_Matar Todos Inimigos"),
 
 
     };
@@ -319,6 +402,9 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             CallSaveRifleBullet(value);
             CallSavePistolBullet(value);
 
+            break;
+        case 6:
+            MatarTodosInimigos = boolean;
             break;
 
     }
