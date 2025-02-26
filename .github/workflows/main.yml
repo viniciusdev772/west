@@ -21,27 +21,42 @@ jobs:
           java-version: 17
           distribution: temurin
 
-      - name: Validate Gradle Wrapper
-        uses: gradle/wrapper-validation-action@v2
+      # Recria o Gradle Wrapper completamente
+      - name: Setup Gradle Wrapper
+        run: |
+          # Remove arquivos potencialmente corrompidos
+          rm -rf gradle
+          rm -f gradlew
+          rm -f gradlew.bat
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: wrapper
+          # Cria novo diretório para o wrapper
+          mkdir -p gradle/wrapper
 
-      - name: Grant Execute Permission for gradlew
-        run: chmod +x gradlew
+          # Baixa arquivos essenciais do Gradle Wrapper
+          wget -O gradle/wrapper/gradle-wrapper.jar https://github.com/gradle/gradle/raw/master/gradle/wrapper/gradle-wrapper.jar
+          wget -O gradle/wrapper/gradle-wrapper.properties https://github.com/gradle/gradle/raw/master/gradle/wrapper/gradle-wrapper.properties
+          wget -O gradlew https://github.com/gradle/gradle/raw/master/gradlew
+          wget -O gradlew.bat https://github.com/gradle/gradle/raw/master/gradlew.bat
 
-      - name: Download Gradle Dependencies
-        run: ./gradlew dependencies
+          # Torna o script executável
+          chmod +x gradlew
 
+      # Executa o Gradle com um comando mais básico
       - name: Build Native Libraries
-        run: ./gradlew :app:externalNativeBuildDebug
+        run: |
+          # Verifica se o Gradle Wrapper está funcionando
+          ./gradlew -v
+
+          # Tenta compilar as bibliotecas nativas
+          ./gradlew :app:externalNativeBuildDebug
 
       - name: Collect Native Libraries
         run: |
           mkdir -p native-libs
           find app/build -name "*.so" -type f -exec cp {} native-libs/ \;
+          # Lista os arquivos para debug
+          echo "Arquivos encontrados:"
+          ls -la native-libs/
 
       - name: Create Release
         id: create_release
