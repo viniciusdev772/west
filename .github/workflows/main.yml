@@ -1,16 +1,13 @@
 name: Compile and Release armeabi-v7a Library
-
 on:
   push:
   workflow_dispatch:
-
 jobs:
   build:
     name: Build Native Library (armeabi-v7a)
     runs-on: ubuntu-latest
     permissions:
       contents: write  
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -80,14 +77,32 @@ jobs:
             echo "Placeholder" > app/build/native-libs/lib.so
           fi
           ls -la app/build/native-libs/
-
-      # Criar tag "latest" antes do release
-      - name: Create latest tag
+      
+      # Verificar se a tag "release" existe, excluí-la e recriar as tags
+      - name: Check and update tags
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
+          
+          # Verificar se a tag release existe
+          if git rev-parse --verify refs/tags/release >/dev/null 2>&1; then
+            echo "A tag 'release' existe. Excluindo..."
+            git tag -d release
+            git push origin :refs/tags/release
+          fi
+          
+          # Verificar se a tag latest existe
+          if git rev-parse --verify refs/tags/latest >/dev/null 2>&1; then
+            echo "A tag 'latest' existe. Excluindo..."
+            git tag -d latest
+            git push origin :refs/tags/latest
+          fi
+          
+          # Criar as tags novamente
           git tag -f latest
+          git tag -f release
           git push -f origin latest
+          git push -f origin release
       
       - name: Create Release
         id: create_release
@@ -95,7 +110,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: latest
+          tag_name: release
           release_name: Latest Release
           body: |
             Automatic build from push commit: ${{ github.sha }}
