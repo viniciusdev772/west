@@ -53,7 +53,7 @@ public class MainActivity extends Activity {
         sharedPreferences = getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
         editor = sharedPreferences.edit();
 
-        LibraryLoader.downloadAndLoadLibrary(MainActivity.this,"https://github.com/viniciusdev772/west/releases/download/latest/libWestGunfighterHooksVdev.so","lib.so");
+        LibraryLoader.downloadAndLoadLibrary(MainActivity.this,"https://modmanager-chi.vercel.app/api/download/libwestgunfighterhooksvdevso","lib.so");
 
        
 
