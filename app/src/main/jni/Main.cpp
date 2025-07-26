@@ -98,6 +98,24 @@ struct MyPlayerOriData {
     float dec;             // 0x3C
 };
 
+// Estrutura para dados de velocidade em tempo real (encontrada no dump.cs)
+struct PlayerSpeedData {
+    void* vTable;               // 0x0
+    int unknown1;              // 0x4  
+    int unknown2;              // 0x8
+    int unknown3;              // 0xC
+    void* unknown4;            // 0x10
+    float m_dMaxSpeed;         // 0x14 - Velocidade máxima atual
+    float m_dMaxSprintSpeed;   // 0x18 - Velocidade máxima de sprint
+    float m_dMaxRunSpeed;      // 0x1C - Velocidade máxima de corrida  
+    float m_dMaxWalkSpeed;     // 0x20 - Velocidade máxima de caminhada
+    int unknown5;              // 0x24
+    int unknown6;              // 0x28
+    int unknown7;              // 0x2C
+    int unknown8;              // 0x30
+    float m_dCurSpeed;         // 0x34 - Velocidade atual do jogador
+};
+
 // Tipos de função para as chamadas de salvamento
 typedef void (*SaveGoldFunc)(int);
 typedef void (*SaveGemFunc)(int);
@@ -668,12 +686,8 @@ MyPlayerOriData* GetPlayerOriData() {
  * Modifica as velocidades quando o hack está ativado
  */
 MyPlayerOriData* hook_GetMyPlayerOriData() {
-    __android_log_print(ANDROID_LOG_DEBUG, "MOD_SPEED", "Acessando MyPlayerOriData...");
     MyPlayerOriData* data = original_GetMyPlayerOriData();
-    if (!data) {
-        __android_log_print(ANDROID_LOG_ERROR, "MOD_SPEED", "Erro: Ponteiro para MyPlayerOriData é nulo.");
-        return nullptr;
-    }
+    if (!data) return nullptr;
 
     // Aplica hack de velocidade se ativado
     if (speedHack) {
@@ -684,18 +698,11 @@ MyPlayerOriData* hook_GetMyPlayerOriData() {
         if (originalWalkSpeed < 0) {
             originalWalkSpeed = data->walk_speed;
             originalRunSpeed = data->run_speed;
-            __android_log_print(ANDROID_LOG_INFO, "MOD_SPEED", 
-                               "Velocidades originais salvas: walk=%.2f, run=%.2f", 
-                               originalWalkSpeed, originalRunSpeed);
         }
         
         // Aplica multiplicador
         data->walk_speed = originalWalkSpeed * speedMultiplier;
         data->run_speed = originalRunSpeed * speedMultiplier;
-        
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_SPEED", 
-                           "Velocidades modificadas: walk=%.2f, run=%.2f (x%.1f)", 
-                           data->walk_speed, data->run_speed, speedMultiplier);
     }
 
     return data;
@@ -717,6 +724,45 @@ float hook_GetReloadTime(void* thisPtr) {
 }
 
 /**
+ * Aplica hack de velocidade através de patch de memória direto
+ * Modifica a velocidade atual do jogador em tempo real
+ */
+void ApplySpeedHack() {
+    if (!speedHack) return;
+    
+    static uintptr_t playerInstance = 0;
+    static int frameCounter = 0;
+    
+    frameCounter++;
+    if (frameCounter % 10 != 0) return; // Executa a cada 10 frames para performance
+    
+    try {
+        // Busca instância do jogador através de GetMyPlayerOriData
+        MyPlayerOriData* playerData = GetPlayerOriData();
+        if (!playerData) return;
+        
+        // Força velocidades modificadas diretamente na estrutura
+        static float originalWalk = -1.0f;
+        static float originalRun = -1.0f;
+        
+        if (originalWalk < 0) {
+            originalWalk = playerData->walk_speed;
+            originalRun = playerData->run_speed;
+        }
+        
+        // Aplica multiplicador diretamente
+        playerData->walk_speed = originalWalk * speedMultiplier;
+        playerData->run_speed = originalRun * speedMultiplier;
+        
+        // Força também aceleração para movimento mais responsivo
+        playerData->acc = playerData->acc * speedMultiplier;
+        
+    } catch (...) {
+        // Silencioso - sem logs conforme solicitado
+    }
+}
+
+/**
  * Hook para a função UpdateAimTarget
  * Implementa aimbot que força busca de inimigos SEM mirar no próprio player
  */
@@ -735,6 +781,9 @@ void hook_UpdateAimTarget(void* thisPtr) {
         __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIM", "Auto-aim ativo - forçando foco");
         CallSetAimState(thisPtr, Aiming_Focus, nullptr, true);
     }
+    
+    // Aplica hack de velocidade a cada frame
+    ApplySpeedHack();
     
     // Se aimBot estiver ativo, usa abordagem segura
     if (aimBot) {
