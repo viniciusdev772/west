@@ -2,8 +2,6 @@ name: Compile and Release Native Library
 on:
   workflow_dispatch:
   push:
-    tags:
-      - 'v*'
   pull_request:
 
 jobs:
