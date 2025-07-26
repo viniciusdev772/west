@@ -175,34 +175,12 @@ jobs:
           fi
         continue-on-error: true
       
-      - name: Fallback - Create dummy lib if all builds failed
+      - name: Fail if no build succeeded
         if: steps.gradle-build.outputs.gradle_success != 'true' && steps.cmake-build.outputs.cmake_success != 'true' && steps.ndk-build.outputs.ndk_success != 'true'
         run: |
-          echo "AVISO: Todas as tentativas de compilação falharam. Criando uma biblioteca fictícia para testes."
-          mkdir -p app/build/native-libs
-          
-          # Criar uma biblioteca de exemplo
-          cat > temp_lib.cpp << 'EOF'
-          #include <jni.h>
-          #include <string>
-          
-          extern "C" JNIEXPORT jstring JNICALL
-          Java_com_example_NativeLib_stringFromJNI(
-                  JNIEnv* env,
-                  jobject /* this */) {
-              std::string hello = "Hello from C++";
-              return env->NewStringUTF(hello.c_str());
-          }
-          EOF
-          
-          # Compilar com clang do NDK
-          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi16-clang++ \
-            -shared \
-            -o app/build/native-libs/libnative.so \
-            temp_lib.cpp \
-            -fPIC \
-            -DANDROID \
-            -std=c++17 || echo "Falha na compilação - criando biblioteca placeholder" && dd if=/dev/zero of=app/build/native-libs/libnative.so bs=1024 count=10
+          echo "ERRO: Todas as tentativas de compilação falharam."
+          echo "Verifique os arquivos de build (build.gradle, CMakeLists.txt, Android.mk)"
+          exit 1
       
       - name: Copy final library
         run: |
@@ -220,12 +198,8 @@ jobs:
             echo "Usando biblioteca compilada pelo ndk-build"
             cp "${{ steps.ndk-build.outputs.lib_path }}" app/build/native-libs/
           else
-            echo "Nenhuma biblioteca válida encontrada, verificando se a fallback foi criada"
-            # Verificar se o fallback criou a biblioteca
-            if [ ! -f "app/build/native-libs/libnative.so" ]; then
-              echo "ERRO: Nenhuma biblioteca encontrada!"
-              exit 1
-            fi
+            echo "ERRO: Nenhuma biblioteca válida encontrada!"
+            exit 1
           fi
           
           # Verificar se existem arquivos na pasta
@@ -254,8 +228,7 @@ jobs:
             ${{ 
               steps.gradle-build.outputs.gradle_success == 'true' && '- Built with Gradle' ||
               steps.cmake-build.outputs.cmake_success == 'true' && '- Built with CMake' ||
-              steps.ndk-build.outputs.ndk_success == 'true' && '- Built with ndk-build' ||
-              '- Created test library (all build methods failed)'
+              steps.ndk-build.outputs.ndk_success == 'true' && '- Built with ndk-build'
             }}
           draft: false
           prerelease: false
