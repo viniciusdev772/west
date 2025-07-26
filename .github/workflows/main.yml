@@ -183,17 +183,17 @@ jobs:
           
           # Criar uma biblioteca de exemplo
           cat > temp_lib.cpp << 'EOF'
-#include <jni.h>
-#include <string>
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_example_NativeLib_stringFromJNI(
-        JNIEnv* env,
-        jobject /* this */) {
-    std::string hello = "Hello from C++";
-    return env->NewStringUTF(hello.c_str());
-}
-EOF
+          #include <jni.h>
+          #include <string>
+          
+          extern "C" JNIEXPORT jstring JNICALL
+          Java_com_example_NativeLib_stringFromJNI(
+                  JNIEnv* env,
+                  jobject /* this */) {
+              std::string hello = "Hello from C++";
+              return env->NewStringUTF(hello.c_str());
+          }
+          EOF
           
           # Compilar com clang do NDK
           $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi16-clang++ \
