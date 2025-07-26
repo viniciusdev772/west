@@ -1,4 +1,4 @@
-name: Compile and Release Native Library
+name: Build Android Native Library
 on:
   workflow_dispatch:
   push:
@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    name: Build Native Library (armeabi-v7a)
+    name: Build Android App with Native Library
     runs-on: ubuntu-latest
     permissions:
       contents: write  
@@ -14,7 +14,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Checkout completo para acessar todas as tags
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -28,205 +28,58 @@ jobs:
       
       - name: Install Android SDK components
         run: |
-          echo "y" | sdkmanager "platforms;android-33"
-          echo "y" | sdkmanager "build-tools;33.0.2"
+          echo "y" | sdkmanager "platforms;android-34"
+          echo "y" | sdkmanager "platforms;android-29"
+          echo "y" | sdkmanager "platforms;android-21"
+          echo "y" | sdkmanager "build-tools;34.0.0"
           echo "y" | sdkmanager "ndk;25.2.9519653"
-          echo "y" | sdkmanager "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
-          echo "ANDROID_CMAKE_HOME=$ANDROID_SDK_ROOT/cmake/3.22.1" >> $GITHUB_ENV
       
       - name: Grant execute permission for gradlew
-        run: |
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-          else
-            echo "Arquivo gradlew não encontrado - pode ser necessário inicializar o projeto Gradle"
-            # Tentando encontrar qualquer script gradlew no projeto
-            find . -name "gradlew" -type f -exec chmod +x {} \;
-          fi
+        run: chmod +x ./gradlew
       
-      - name: Check for build files
-        id: check-build
+      - name: Create local.properties
         run: |
-          # Verificar se temos o arquivo build.gradle
-          if [ -f "./build.gradle" ] || [ -f "./app/build.gradle" ]; then
-            echo "found_gradle=true" >> $GITHUB_OUTPUT
-          else
-            echo "found_gradle=false" >> $GITHUB_OUTPUT
-          fi
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
+      
+      - name: Build Android project with native library
+        run: ./gradlew :app:assembleDebug --stacktrace
+      
+      - name: Find and copy native libraries
+        run: |
+          echo "Searching for compiled native libraries..."
+          find . -name "*.so" -type f | head -10
           
-          # Verificar se temos o arquivo CMakeLists.txt
-          if [ -f "./CMakeLists.txt" ] || [ -f "./app/src/main/cpp/CMakeLists.txt" ]; then
-            echo "found_cmake=true" >> $GITHUB_OUTPUT
-          else
-            echo "found_cmake=false" >> $GITHUB_OUTPUT
-          fi
+          # Create output directory
+          mkdir -p artifacts/native-libs
           
-          # Verificar se temos o arquivo Android.mk
-          if [ -f "./Android.mk" ] || [ -f "./app/src/main/jni/Android.mk" ]; then
-            echo "found_ndk_build=true" >> $GITHUB_OUTPUT
+          # Copy native libraries if found
+          if find app/build -name "*.so" -type f | grep -q .; then
+            find app/build -name "*.so" -type f -exec cp {} artifacts/native-libs/ \;
+            echo "Native libraries copied to artifacts/native-libs/"
+            ls -la artifacts/native-libs/
           else
-            echo "found_ndk_build=false" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Build with Gradle (if available)
-        if: steps.check-build.outputs.found_gradle == 'true'
-        id: gradle-build
-        run: |
-          if [ -f "./gradlew" ]; then
-            # Tentar construir o projeto Android com Gradle
-            ./gradlew :app:externalNativeBuildDebug -PminSdkVersion=16 || echo "Falha na compilação Gradle"
-            
-            # Procurar por arquivos .so gerados pelo Gradle
-            SO_FILES=$(find . -name "*.so" -type f)
-            if [ ! -z "$SO_FILES" ]; then
-              echo "Arquivos .so encontrados pela compilação Gradle:"
-              echo "$SO_FILES"
-              
-              # Usar o primeiro arquivo .so encontrado
-              FIRST_LIB=$(echo "$SO_FILES" | head -n 1)
-              echo "lib_path=$FIRST_LIB" >> $GITHUB_OUTPUT
-              echo "gradle_success=true" >> $GITHUB_OUTPUT
-            else
-              echo "Nenhum arquivo .so encontrado após compilação Gradle"
-              echo "gradle_success=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "Arquivo gradlew não encontrado - pulando build Gradle"
-            echo "gradle_success=false" >> $GITHUB_OUTPUT
-          fi
-        continue-on-error: true
-      
-      - name: Build with CMake (if available)
-        if: steps.check-build.outputs.found_cmake == 'true' && steps.gradle-build.outputs.gradle_success != 'true'
-        id: cmake-build
-        run: |
-          # Encontrar o CMakeLists.txt
-          CMAKE_FILE=$(find . -name "CMakeLists.txt" | head -n 1)
-          if [ ! -z "$CMAKE_FILE" ]; then
-            CMAKE_DIR=$(dirname "$CMAKE_FILE")
-            echo "Encontrado CMakeLists.txt em: $CMAKE_DIR"
-            
-            # Criar diretório de build e construir com CMake
-            mkdir -p "$CMAKE_DIR/build"
-            cd "$CMAKE_DIR/build"
-            
-            $ANDROID_CMAKE_HOME/bin/cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-                     -DANDROID_ABI=armeabi-v7a \
-                     -DANDROID_PLATFORM=android-16 \
-                     -DCMAKE_BUILD_TYPE=Release \
-                     ..
-            
-            $ANDROID_CMAKE_HOME/bin/cmake --build .
-            
-            # Procurar por arquivos .so gerados
-            SO_FILES=$(find . -name "*.so" -type f)
-            if [ ! -z "$SO_FILES" ]; then
-              echo "Arquivos .so encontrados pela compilação CMake:"
-              echo "$SO_FILES"
-              
-              # Usar o primeiro arquivo .so encontrado
-              FIRST_LIB=$(echo "$SO_FILES" | head -n 1)
-              echo "lib_path=$FIRST_LIB" >> $GITHUB_OUTPUT
-              echo "cmake_success=true" >> $GITHUB_OUTPUT
-            else
-              echo "Nenhum arquivo .so encontrado após compilação CMake"
-              echo "cmake_success=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "Arquivo CMakeLists.txt não encontrado"
-            echo "cmake_success=false" >> $GITHUB_OUTPUT
-          fi
-        continue-on-error: true
-      
-      - name: Build with ndk-build (if available)
-        if: steps.check-build.outputs.found_ndk_build == 'true' && steps.gradle-build.outputs.gradle_success != 'true' && steps.cmake-build.outputs.cmake_success != 'true'
-        id: ndk-build
-        run: |
-          # Encontrar o Android.mk
-          MK_FILE=$(find . -name "Android.mk" | head -n 1)
-          if [ ! -z "$MK_FILE" ]; then
-            MK_DIR=$(dirname "$MK_FILE")
-            echo "Encontrado Android.mk em: $MK_DIR"
-            
-            # Construir com ndk-build
-            cd "$MK_DIR"
-            $ANDROID_NDK_HOME/ndk-build APP_ABI="armeabi-v7a" APP_PLATFORM=android-16 NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk
-            
-            # Procurar por arquivos .so gerados
-            SO_FILES=$(find . -name "*.so" -type f)
-            if [ ! -z "$SO_FILES" ]; then
-              echo "Arquivos .so encontrados pela compilação ndk-build:"
-              echo "$SO_FILES"
-              
-              # Usar o primeiro arquivo .so encontrado
-              FIRST_LIB=$(echo "$SO_FILES" | head -n 1)
-              echo "lib_path=$FIRST_LIB" >> $GITHUB_OUTPUT
-              echo "ndk_success=true" >> $GITHUB_OUTPUT
-            else
-              echo "Nenhum arquivo .so encontrado após compilação ndk-build"
-              echo "ndk_success=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "Arquivo Android.mk não encontrado"
-            echo "ndk_success=false" >> $GITHUB_OUTPUT
-          fi
-        continue-on-error: true
-      
-      - name: Fail if no build succeeded
-        if: steps.gradle-build.outputs.gradle_success != 'true' && steps.cmake-build.outputs.cmake_success != 'true' && steps.ndk-build.outputs.ndk_success != 'true'
-        run: |
-          echo "ERRO: Todas as tentativas de compilação falharam."
-          echo "Verifique os arquivos de build (build.gradle, CMakeLists.txt, Android.mk)"
-          exit 1
-      
-      - name: Copy final library
-        run: |
-          # Garantir que o diretório existe
-          mkdir -p app/build/native-libs
-          
-          # Determinar qual biblioteca usar
-          if [ ! -z "${{ steps.gradle-build.outputs.lib_path }}" ]; then
-            echo "Usando biblioteca compilada pelo Gradle"
-            cp "${{ steps.gradle-build.outputs.lib_path }}" app/build/native-libs/
-          elif [ ! -z "${{ steps.cmake-build.outputs.lib_path }}" ]; then
-            echo "Usando biblioteca compilada pelo CMake"
-            cp "${{ steps.cmake-build.outputs.lib_path }}" app/build/native-libs/
-          elif [ ! -z "${{ steps.ndk-build.outputs.lib_path }}" ]; then
-            echo "Usando biblioteca compilada pelo ndk-build"
-            cp "${{ steps.ndk-build.outputs.lib_path }}" app/build/native-libs/
-          else
-            echo "ERRO: Nenhuma biblioteca válida encontrada!"
+            echo "No native libraries found in build output"
             exit 1
           fi
-          
-          # Verificar se existem arquivos na pasta
-          echo "Biblioteca(s) final(is):"
-          ls -la app/build/native-libs/
       
-      - name: Upload native library as artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: native-libs
-          path: app/build/native-libs/
+          name: android-native-libs
+          path: artifacts/native-libs/
       
       - name: Create Release
-        id: create_release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: app/build/native-libs/*.so
+          files: artifacts/native-libs/*.so
           name: Release ${{ github.ref_name }}
           body: |
             Automatic build from tag: ${{ github.ref_name }}
             
-            This release contains the compiled native libraries.
-            
-            Build method:
-            ${{ 
-              steps.gradle-build.outputs.gradle_success == 'true' && '- Built with Gradle' ||
-              steps.cmake-build.outputs.cmake_success == 'true' && '- Built with CMake' ||
-              steps.ndk-build.outputs.ndk_success == 'true' && '- Built with ndk-build'
-            }}
+            This release contains the compiled native libraries for armeabi-v7a architecture.
+            Built using Android Gradle Plugin with NDK.
           draft: false
           prerelease: false
