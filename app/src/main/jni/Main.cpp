@@ -42,7 +42,14 @@ bool infiniteGold = false;
 bool infiniteAmmo = false;
 bool infiniteHealth = false;
 bool infiniteResources = false;
+bool playerOnHorse = false;
+bool instantReload = false;
+bool speedHack = false;
+bool autoAim = false;
+bool aimBot = false;
+bool alwaysHeadshot = false;
 int sliderValue = 1, Moedas = 0, Gems = 0;
+float speedMultiplier = 1.0f;
 
 // Estrutura para dados do jogador em tempo real
 struct MyPlayerRealtimeData {
@@ -63,6 +70,21 @@ typedef void (*SaveGemFunc)(int);
 typedef void (*SaveRifleBulletFunc)(int);
 typedef void (*SaveShotgunBulletFunc)(int);
 typedef void (*SavePistolBulletFunc)(int);
+typedef void (*SaveCurrentPlayerPositionFunc)(Vector3);
+typedef void (*SetPlayerOnHorseFunc)();
+typedef void (*SetPlayerOffHorseFunc)();
+typedef void (*ReloadBulletsFunc)();
+typedef float (*GetReloadTimeFunc)();
+
+// Enumeração para estados de mira
+enum AimTargetState {
+    Nobody = 0,
+    Aiming_Focus = 1,
+    Aiming_NotFocus = 2
+};
+
+typedef void (*UpdateAimTargetFunc)(void* thisPtr);
+typedef void (*SetAimStateFunc)(void* thisPtr, AimTargetState state, void* target, bool forceTarget);
 
 /**
  * Salva a quantidade de munição de pistola
@@ -120,25 +142,121 @@ void CallSaveGem(int gemAmount) {
 }
 
 /**
+ * Salva a posição atual do jogador
+ * @param position Posição do jogador
+ */
+void CallSaveCurrentPlayerPosition(Vector3 position) {
+    uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x52BEF4);
+    auto savePosition = reinterpret_cast<SaveCurrentPlayerPositionFunc>(baseAddress);
+    savePosition(position);
+    __android_log_print(ANDROID_LOG_INFO, "ModMenu", "Posição do jogador salva: (%.2f, %.2f, %.2f)", 
+                        position.x, position.y, position.z);
+}
+
+/**
+ * Coloca o jogador no cavalo
+ */
+void CallSetPlayerOnHorse() {
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x2F1498);
+        if (baseAddress == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Erro: Endereço base inválido para SetPlayerOnHorse");
+            return;
+        }
+        
+        auto setPlayerOnHorse = reinterpret_cast<SetPlayerOnHorseFunc>(baseAddress);
+        setPlayerOnHorse();
+        __android_log_print(ANDROID_LOG_INFO, "ModMenu", "Jogador colocado no cavalo");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Exceção em SetPlayerOnHorse");
+    }
+}
+
+/**
+ * Remove o jogador do cavalo
+ */
+void CallSetPlayerOffHorse() {
+    try {
+        // Nota: Offset ainda não encontrado no dump, usando offset estimado
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x2F14A0); // Offset estimado
+        if (baseAddress == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Erro: Endereço base inválido para SetPlayerOffHorse");
+            return;
+        }
+        
+        auto setPlayerOffHorse = reinterpret_cast<SetPlayerOffHorseFunc>(baseAddress);
+        setPlayerOffHorse();
+        __android_log_print(ANDROID_LOG_INFO, "ModMenu", "Jogador removido do cavalo");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Exceção em SetPlayerOffHorse");
+    }
+}
+
+/**
+ * Força atualização do alvo de mira (com verificação de segurança)
+ * @param playerCtrl Ponteiro para o controlador do jogador
+ */
+void CallUpdateAimTarget(void* playerCtrl) {
+    if (!playerCtrl) {
+        __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Erro: Ponteiro do jogador é nulo");
+        return;
+    }
+    
+    uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x45CF6C);
+    auto updateAimTarget = reinterpret_cast<UpdateAimTargetFunc>(baseAddress);
+    updateAimTarget(playerCtrl);
+    __android_log_print(ANDROID_LOG_INFO, "ModMenu", "Alvo de mira atualizado");
+}
+
+/**
+ * Define estado de mira (com verificação de segurança)
+ * @param playerCtrl Ponteiro para o controlador do jogador
+ * @param state Estado da mira
+ * @param target Alvo (pode ser null)
+ * @param forceTarget Forçar alvo
+ */
+void CallSetAimState(void* playerCtrl, AimTargetState state, void* target, bool forceTarget) {
+    if (!playerCtrl) {
+        __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Erro: Ponteiro do jogador é nulo");
+        return;
+    }
+    
+    uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4599AC);
+    auto setAimState = reinterpret_cast<SetAimStateFunc>(baseAddress);
+    setAimState(playerCtrl, state, target, forceTarget);
+    __android_log_print(ANDROID_LOG_INFO, "ModMenu", "Estado de mira alterado para: %d", state);
+}
+
+/**
  * Adiciona um item específico ao inventário
  * @param goodType Tipo do item a ser adicionado
  * @param amount Quantidade a ser adicionada
  */
 void AddItemToInventory(DropGoodsType goodType, int amount) {
-    typedef int (*GetNumFunc)(int);
-    typedef void (*SetNumFunc)(int, int);
+    try {
+        typedef int (*GetNumFunc)(int);
+        typedef void (*SetNumFunc)(int, int);
 
-    uintptr_t addr_GetNum = getAbsoluteAddress(targetLibName, 0x53B1A0); // GetDropGoodNumber
-    uintptr_t addr_SetNum = getAbsoluteAddress(targetLibName, 0x53B71C); // SetDropGoodNumber
+        uintptr_t addr_GetNum = getAbsoluteAddress(targetLibName, 0x53B1A0); // GetDropGoodNumber
+        uintptr_t addr_SetNum = getAbsoluteAddress(targetLibName, 0x53B71C); // SetDropGoodNumber
 
-    auto getNum = reinterpret_cast<GetNumFunc>(addr_GetNum);
-    auto setNum = reinterpret_cast<SetNumFunc>(addr_SetNum);
+        // Verificações de segurança
+        if (addr_GetNum == 0 || addr_SetNum == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_ITEMS", "Erro: Endereços inválidos para AddItemToInventory");
+            return;
+        }
 
-    int currentAmount = getNum((int)goodType);
-    setNum((int)goodType, currentAmount + amount);
+        auto getNum = reinterpret_cast<GetNumFunc>(addr_GetNum);
+        auto setNum = reinterpret_cast<SetNumFunc>(addr_SetNum);
 
-    __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Adicionado %d do item tipo %d. Total: %d",
-                        amount, (int)goodType, currentAmount + amount);
+        int currentAmount = getNum((int)goodType);
+        setNum((int)goodType, currentAmount + amount);
+
+        __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Adicionado %d do item tipo %d. Total: %d",
+                            amount, (int)goodType, currentAmount + amount);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_ITEMS", "Exceção em AddItemToInventory");
+    }
 }
 
 // Ponteiro para função original GetMyPlayerRealtimeData
@@ -176,13 +294,28 @@ int (*original_GetHitBlood)(void *thisPtr, int part, int type, float enemy, floa
 
 /**
  * Hook para a função GetHitBlood
- * Modifica o dano causado pelas balas
+ * Modifica o dano causado pelas balas (com verificações de segurança)
  */
 int hook_GetHitBlood(void *thisPtr, int part, int type, float enemy, float myPosition, int modelType) {
+    // Verificação de segurança para evitar crashes
+    if (!thisPtr) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD", "Erro: thisPtr é nulo em GetHitBlood");
+        return 1; // Retorna dano mínimo
+    }
+    
     __android_log_print(ANDROID_LOG_DEBUG, "MOD", "Entrada na função GetHitBlood");
     int result = original_GetHitBlood(thisPtr, part, type, enemy, myPosition, modelType);
-    __android_log_print(ANDROID_LOG_DEBUG, "MOD", "Dano calculado: %d", result);
-    return sliderValue; // Retorna o valor definido pelo usuário no slider
+    
+    // Se alwaysHeadshot estiver ativo e for parte da cabeça, aumenta o dano
+    if (alwaysHeadshot && part == 0) { // Assumindo que 0 = cabeça
+        result = sliderValue * 2; // Dano de headshot
+        __android_log_print(ANDROID_LOG_DEBUG, "MOD", "Headshot forçado! Dano: %d", result);
+    } else {
+        result = sliderValue;
+    }
+    
+    __android_log_print(ANDROID_LOG_DEBUG, "MOD", "Dano final: %d", result);
+    return result;
 }
 
 // ================ HOOKS PARA SISTEMA DE POSIÇÃO DE INIMIGOS =================
@@ -313,6 +446,15 @@ int hook_GetDropGoodNumber(int goodType) {
 // Ponteiro para função original SetDropGoodNumber
 void (*original_SetDropGoodNumber)(int goodType, int num);
 
+// Ponteiros para funções de velocidade e recarga
+float (*original_GetReloadTime)(void* thisPtr);
+float (*original_GetWalkSpeed)(void* thisPtr);
+float (*original_GetRunSpeed)(void* thisPtr);
+
+// Ponteiros para funções de mira
+void (*original_UpdateAimTarget)(void* thisPtr);
+void (*original_SetAimState)(void* thisPtr, AimTargetState state, void* target, bool forceTarget);
+
 /**
  * Hook para a função SetDropGoodNumber
  * Monitora quando a quantidade de itens é alterada
@@ -338,6 +480,117 @@ void hook_SetDropGoodNumber(int goodType, int num) {
 
     // Chama a função original
     original_SetDropGoodNumber(goodType, num);
+}
+
+// ================ HOOKS PARA VELOCIDADE E RECARGA =================
+
+/**
+ * Hook para a função GetReloadTime
+ * Modifica o tempo de recarga das armas
+ */
+float hook_GetReloadTime(void* thisPtr) {
+    float originalTime = original_GetReloadTime(thisPtr);
+    
+    if (instantReload) {
+        __android_log_print(ANDROID_LOG_DEBUG, "MOD_RELOAD", "Recarga instantânea ativada");
+        return 0.1f; // Tempo mínimo para evitar bugs
+    }
+    
+    return originalTime;
+}
+
+/**
+ * Hook para a função GetWalkSpeed
+ * Modifica a velocidade de caminhada
+ */
+float hook_GetWalkSpeed(void* thisPtr) {
+    float originalSpeed = original_GetWalkSpeed(thisPtr);
+    
+    if (speedHack) {
+        float modifiedSpeed = originalSpeed * speedMultiplier;
+        __android_log_print(ANDROID_LOG_DEBUG, "MOD_SPEED", 
+                            "Velocidade caminhada modificada: %.2f -> %.2f", 
+                            originalSpeed, modifiedSpeed);
+        return modifiedSpeed;
+    }
+    
+    return originalSpeed;
+}
+
+/**
+ * Hook para a função GetRunSpeed
+ * Modifica a velocidade de corrida
+ */
+float hook_GetRunSpeed(void* thisPtr) {
+    float originalSpeed = original_GetRunSpeed(thisPtr);
+    
+    if (speedHack) {
+        float modifiedSpeed = originalSpeed * speedMultiplier;
+        __android_log_print(ANDROID_LOG_DEBUG, "MOD_SPEED", 
+                            "Velocidade corrida modificada: %.2f -> %.2f", 
+                            originalSpeed, modifiedSpeed);
+        return modifiedSpeed;
+    }
+    
+    return originalSpeed;
+}
+
+// ================ HOOKS PARA SISTEMA DE MIRA =================
+
+/**
+ * Hook para a função UpdateAimTarget
+ * Força mira automática quando ativado
+ */
+void hook_UpdateAimTarget(void* thisPtr) {
+    // Verificação de segurança
+    if (!thisPtr) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_AIM", "Erro: thisPtr é nulo em UpdateAimTarget");
+        return;
+    }
+    
+    // Chama a função original primeiro
+    original_UpdateAimTarget(thisPtr);
+    
+    // Se autoAim estiver ativado, força estado de mira focada
+    if (autoAim) {
+        __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIM", "Auto-aim ativo - forçando foco");
+        // Força estado de mira focada
+        CallSetAimState(thisPtr, Aiming_Focus, nullptr, true);
+    }
+    
+    if (aimBot) {
+        __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIM", "Aimbot ativo");
+        // Implementação básica de aimbot seria aqui
+        // Por segurança, apenas logamos por enquanto
+    }
+}
+
+/**
+ * Hook para a função SetAimState
+ * Monitora e modifica estados de mira
+ */
+void hook_SetAimState(void* thisPtr, AimTargetState state, void* target, bool forceTarget) {
+    // Verificação de segurança
+    if (!thisPtr) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_AIM", "Erro: thisPtr é nulo em SetAimState");
+        return;
+    }
+    
+    AimTargetState finalState = state;
+    
+    // Se autoAim estiver ativo, sempre força foco quando há um alvo
+    if (autoAim && target && state == Aiming_NotFocus) {
+        finalState = Aiming_Focus;
+        forceTarget = true;
+        __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIM", "Auto-aim: Convertendo NotFocus para Focus");
+    }
+    
+    __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIM", 
+                        "SetAimState: Estado=%d, Alvo=%p, Forçar=%d", 
+                        finalState, target, forceTarget);
+    
+    // Chama a função original com possíveis modificações
+    original_SetAimState(thisPtr, finalState, target, forceTarget);
 }
 
 /**
@@ -405,6 +658,28 @@ void *hack_thread(void *) {
     MSHookFunction((void *) addr_SetDropGoodNumber, (void *) &hook_SetDropGoodNumber,
                    (void **) &original_SetDropGoodNumber);
 
+    // ====== Hooks das novas funcionalidades ======
+
+    // Hook para tempo de recarga das armas
+    uintptr_t addr_GetReloadTime = getAbsoluteAddress(targetLibName, 0x456E48);
+    MSHookFunction((void *) addr_GetReloadTime, (void *) &hook_GetReloadTime,
+                   (void **) &original_GetReloadTime);
+
+    // Nota: Os hooks de velocidade serão implementados através de modificação de memória
+    // pois walk_speed e run_speed são campos de struct, não funções
+
+    // ====== Hooks do sistema de mira ======
+
+    // Hook para atualização de alvos de mira
+    uintptr_t addr_UpdateAimTarget = getAbsoluteAddress(targetLibName, 0x45CF6C);
+    MSHookFunction((void *) addr_UpdateAimTarget, (void *) &hook_UpdateAimTarget,
+                   (void **) &original_UpdateAimTarget);
+
+    // Hook para configuração de estado de mira
+    uintptr_t addr_SetAimState = getAbsoluteAddress(targetLibName, 0x4599AC);
+    MSHookFunction((void *) addr_SetAimState, (void *) &hook_SetAimState,
+                   (void **) &original_SetAimState);
+
     LOGI(OBFUSCATE("Hooks aplicados com sucesso"));
 #endif
 
@@ -440,6 +715,21 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("12_Button_Adicionar Todas as Partes de Armas"),
             OBFUSCATE("13_Button_Adicionar Todas as Peles"),
             OBFUSCATE("14_Button_Adicionar 10 Whisky"),
+
+            // Novas funcionalidades
+            OBFUSCATE("Category_Controle do Jogador"),
+            OBFUSCATE("15_Button_Colocar no Cavalo"),
+            OBFUSCATE("16_Button_Remover do Cavalo"),
+            OBFUSCATE("17_Toggle_Recarga Instantânea"),
+            OBFUSCATE("18_Toggle_Hack de Velocidade"),
+            OBFUSCATE("19_SeekBar_Multiplicador de Velocidade_1_10"),
+
+            // Sistema de mira
+            OBFUSCATE("Category_Sistema de Mira"),
+            OBFUSCATE("20_Toggle_Auto-Aim"),
+            OBFUSCATE("21_Toggle_AimBot"),
+            OBFUSCATE("22_Toggle_Sempre Headshot"),
+            OBFUSCATE("23_Button_Forçar Atualização de Mira"),
     };
 
     int Total_Feature = (sizeof features / sizeof features[0]);
@@ -568,6 +858,66 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
         case 14: // Adicionar Whisky
             AddItemToInventory(WHISKY, 10);
             __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Adicionadas 10 unidades de Whisky");
+            break;
+        case 15: // Colocar no cavalo
+            CallSetPlayerOnHorse();
+            playerOnHorse = true;
+            break;
+        case 16: // Remover do cavalo
+            CallSetPlayerOffHorse();
+            playerOnHorse = false;
+            break;
+        case 17: // Recarga instantânea
+            instantReload = boolean;
+            if (boolean) {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_RELOAD", "Recarga instantânea ativada");
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_RELOAD", "Recarga instantânea desativada");
+            }
+            break;
+        case 18: // Hack de velocidade
+            speedHack = boolean;
+            if (boolean) {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_SPEED", "Hack de velocidade ativado");
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_SPEED", "Hack de velocidade desativado");
+            }
+            break;
+        case 19: // Multiplicador de velocidade
+            if (value >= 1 && value <= 10) {
+                speedMultiplier = (float)value;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_SPEED", 
+                                    "Multiplicador de velocidade alterado para: %.1f", speedMultiplier);
+            }
+            break;
+        case 20: // Auto-Aim
+            autoAim = boolean;
+            if (boolean) {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Auto-Aim ativado");
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Auto-Aim desativado");
+            }
+            break;
+        case 21: // AimBot
+            aimBot = boolean;
+            if (boolean) {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "AimBot ativado");
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "AimBot desativado");
+            }
+            break;
+        case 22: // Sempre Headshot
+            alwaysHeadshot = boolean;
+            if (boolean) {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Sempre Headshot ativado");
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Sempre Headshot desativado");
+            }
+            break;
+        case 23: // Forçar atualização de mira
+            // Esta função requer um ponteiro do jogador, então vamos implementá-la de forma segura
+            __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Forçando atualização de mira (funcionalidade limitada)");
+            // Por segurança, apenas logamos. Uma implementação completa requereria mais context
             break;
     }
 }

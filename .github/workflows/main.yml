@@ -14,12 +14,12 @@ jobs:
       contents: write  
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Checkout completo para acessar todas as tags
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -182,16 +182,18 @@ jobs:
           mkdir -p app/build/native-libs
           
           # Criar uma biblioteca de exemplo
-          echo "#include <jni.h>
-          #include <string>
-          
-          extern \"C\" JNIEXPORT jstring JNICALL
-          Java_com_example_NativeLib_stringFromJNI(
-                  JNIEnv* env,
-                  jobject /* this */) {
-              std::string hello = \"Hello from C++\";
-              return env->NewStringUTF(hello.c_str());
-          }" > temp_lib.cpp
+          cat > temp_lib.cpp << 'EOF'
+#include <jni.h>
+#include <string>
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_example_NativeLib_stringFromJNI(
+        JNIEnv* env,
+        jobject /* this */) {
+    std::string hello = "Hello from C++";
+    return env->NewStringUTF(hello.c_str());
+}
+EOF
           
           # Compilar com clang do NDK
           $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi16-clang++ \
@@ -200,7 +202,7 @@ jobs:
             temp_lib.cpp \
             -fPIC \
             -DANDROID \
-            -std=c++17 || dd if=/dev/urandom of=app/build/native-libs/libnative.so bs=1024 count=10
+            -std=c++17 || echo "Falha na compilação - criando biblioteca placeholder" && dd if=/dev/zero of=app/build/native-libs/libnative.so bs=1024 count=10
       
       - name: Copy final library
         run: |
@@ -249,9 +251,11 @@ jobs:
             This release contains the compiled native libraries.
             
             Build method:
-            ${{ steps.gradle-build.outputs.gradle_success == 'true' && '- Built with Gradle' || 
-                steps.cmake-build.outputs.cmake_success == 'true' && '- Built with CMake' || 
-                steps.ndk-build.outputs.ndk_success == 'true' && '- Built with ndk-build' ||
-                '- Created test library (all build methods failed)' }}
+            ${{ 
+              steps.gradle-build.outputs.gradle_success == 'true' && '- Built with Gradle' ||
+              steps.cmake-build.outputs.cmake_success == 'true' && '- Built with CMake' ||
+              steps.ndk-build.outputs.ndk_success == 'true' && '- Built with ndk-build' ||
+              '- Created test library (all build methods failed)'
+            }}
           draft: false
           prerelease: false
