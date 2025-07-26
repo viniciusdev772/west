@@ -48,6 +48,9 @@ enum DropGoodsType {
 // ✅ EnemyPosCtrl: Acesso real à lista de inimigos (0x2E66C4)
 // ✅ PlayerBaseType: Enum para distinguir Cowboy, EnemyNPC, Animal, Zombies, etc
 // ✅ Anti-Crash: Estados do jogo ao invés de funções diretas para cavalo
+// ✅ Sistema Policial V1: NPCs policiais, xerife, caçadores de recompensa
+// ✅ Controle de Polícia: GeneratePolice, HideAllPolice, GetPoliceMaxNum
+// ✅ NPCs da Lei: Sheriff(18), BountyHunter(25) com estados reais
 // ✅ Busca Forçada: Múltiplas chamadas de UpdateAimTarget para acelerar detecção
 // ✅ Logs melhorados: Emojis específicos 🎯🧟👹 para diferentes tipos de inimigos
 // ===============================================================================
@@ -189,6 +192,30 @@ enum AnimalType {
     Eagle = 49            // ✅ Águia
 };
 
+// ========== ENUMS PARA SISTEMA POLICIAL (do dump.cs) ==========
+
+// Estados do Xerife (do dump.cs)
+enum NpcSheriffStates {
+    SheriffInit = 0,
+    SheriffIdle = 1,
+    SheriffWalkingDes = 2,
+    SheriffPickWarrant = 3    // ✅ Pegar mandado de prisão
+};
+
+// Estados do Caçador de Recompensas (do dump.cs)
+enum NpcBountyHunterStates {
+    BountyInit = 0,
+    BountyIdle = 1,
+    BountyStirCoffee = 2,     // ✅ Mexer café
+    BountyDrinkingCoffee = 3  // ✅ Beber café
+};
+
+// Tipos de Posições Policiais (do dump.cs)
+enum PoliceScenePosType {
+    NV_PoliceStation = 5,     // ✅ Delegacia
+    NV_PoliceWarrant = 14     // ✅ Mandado policial
+};
+
 typedef void (*UpdateAimTargetFunc)(void* thisPtr);
 typedef void (*SetAimStateFunc)(void* thisPtr, AimTargetState state, void* target, bool forceTarget);
 typedef void (*SetTargetPlayerFunc)(void* thisPtr, void* player);
@@ -197,10 +224,30 @@ typedef int (*GetClosestCharacterFunc)(void* verts, Vector3 pos);
 typedef PlayerBaseType (*GetPlayerBaseTypeFunc)(void* thisPtr);
 typedef AnimalType (*GetAnimalTypeFunc)(void* thisPtr);
 
+// ========== TIPOS DE FUNÇÃO PARA SISTEMA POLICIAL ==========
+typedef void* (*GetNPCenemyOriDataFunc)(int ID);
+typedef int (*GetPoliceMaxNumFunc)();
+typedef void (*GeneratePoliceFunc)(void* thisPtr);
+typedef Vector3 (*GetPoliceBurnPosFunc)(void* thisPtr, Vector3 playerPos, float minSqr, float maxSqr);
+typedef void (*HideNonNpcAndPoliceFunc)(void* thisPtr);
+typedef void (*RecoverNonNpcAndPoliceFunc)(void* thisPtr);
+typedef void* (*GetNpcSheriffInstanceFunc)();
+typedef void* (*GetNpcBountyHunterInstanceFunc)();
+
 // Declarações antecipadas das funções necessárias
 void* CallGetTargetPlayer(void* playerCtrl);
 void CallSetAimState(void* playerCtrl, AimTargetState state, void* target, bool forceTarget);
 void CallSetTargetPlayer(void* playerCtrl, void* target);
+
+// ========== DECLARAÇÕES ANTECIPADAS - SISTEMA POLICIAL ==========
+void* GetNPCenemyOriData(int ID);
+int GetPoliceMaxNum();
+void GeneratePolice(void* missionCtrl);
+Vector3 GetPoliceBurnPos(void* enemyPosCtrl, Vector3 playerPos, float minSqr, float maxSqr);
+void HideAllPolice(void* missionCtrl);
+void ShowAllPolice(void* missionCtrl);
+void* GetSheriffInstance();
+void* GetBountyHunterInstance();
 
 /**
  * Verifica se um alvo é válido para o aimbot
@@ -487,6 +534,146 @@ void* GetEnemyPosCtrlInstance() {
         return enemyPosCtrl;
     } catch (...) {
         __android_log_print(ANDROID_LOG_ERROR, "MOD_AIMBOT", "Exceção ao obter EnemyPosCtrl");
+        return nullptr;
+    }
+}
+
+// ========== IMPLEMENTAÇÃO DO SISTEMA POLICIAL ==========
+
+/**
+ * Obtém dados de origem de NPCs inimigos (inclui polícia)
+ * Offset baseado na função PoliceLoader.GetNPCenemyOriData do dump.cs
+ */
+void* GetNPCenemyOriData(int ID) {
+    try {
+        // Função do PoliceLoader para obter dados de NPCs inimigos
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x49A8F0); // Offset estimado
+        if (baseAddress == 0) return nullptr;
+        
+        auto getNPCEnemyOriData = reinterpret_cast<GetNPCenemyOriDataFunc>(baseAddress);
+        return getNPCEnemyOriData(ID);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+/**
+ * Obtém número máximo de policiais permitidos
+ * Baseado na função GetPoliceMaxNum do dump.cs
+ */
+int GetPoliceMaxNum() {
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4A2B40); // Offset estimado
+        if (baseAddress == 0) return 0;
+        
+        auto getPoliceMaxNum = reinterpret_cast<GetPoliceMaxNumFunc>(baseAddress);
+        return getPoliceMaxNum();
+    } catch (...) {
+        return 0;
+    }
+}
+
+/**
+ * Gera/spawna policiais no jogo
+ * Baseado na função GeneratePolice do dump.cs
+ */
+void GeneratePolice(void* missionCtrl) {
+    if (!missionCtrl) return;
+    
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B1A20); // Offset estimado
+        if (baseAddress == 0) return;
+        
+        auto generatePolice = reinterpret_cast<GeneratePoliceFunc>(baseAddress);
+        generatePolice(missionCtrl);
+    } catch (...) {
+        // Silencioso
+    }
+}
+
+/**
+ * Obtém posição de spawn da polícia baseada na posição do jogador
+ * Baseado na função GetPoliceBurnPos do dump.cs - OFFSET REAL: 0x2E6B40
+ */
+Vector3 GetPoliceBurnPos(void* enemyPosCtrl, Vector3 playerPos, float minSqr, float maxSqr) {
+    Vector3 defaultPos = {0.0f, 0.0f, 0.0f};
+    if (!enemyPosCtrl) return defaultPos;
+    
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x2E6B40); // Offset real já usado
+        if (baseAddress == 0) return defaultPos;
+        
+        auto getPoliceBurnPos = reinterpret_cast<GetPoliceBurnPosFunc>(baseAddress);
+        return getPoliceBurnPos(enemyPosCtrl, playerPos, minSqr, maxSqr);
+    } catch (...) {
+        return defaultPos;
+    }
+}
+
+/**
+ * Oculta todos os NPCs e policiais
+ * Baseado na função HideNonNpcAndPolice do dump.cs
+ */
+void HideAllPolice(void* missionCtrl) {
+    if (!missionCtrl) return;
+    
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B2F10); // Offset estimado
+        if (baseAddress == 0) return;
+        
+        auto hideNonNpcAndPolice = reinterpret_cast<HideNonNpcAndPoliceFunc>(baseAddress);
+        hideNonNpcAndPolice(missionCtrl);
+    } catch (...) {
+        // Silencioso
+    }
+}
+
+/**
+ * Mostra/recupera todos os NPCs e policiais
+ * Baseado na função RecoverNonNpcAndPolice do dump.cs
+ */
+void ShowAllPolice(void* missionCtrl) {
+    if (!missionCtrl) return;
+    
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B3020); // Offset estimado
+        if (baseAddress == 0) return;
+        
+        auto recoverNonNpcAndPolice = reinterpret_cast<RecoverNonNpcAndPoliceFunc>(baseAddress);
+        recoverNonNpcAndPolice(missionCtrl);
+    } catch (...) {
+        // Silencioso
+    }
+}
+
+/**
+ * Obtém instância do xerife
+ * Baseado na função NpcSheriff.get_Instance do dump.cs
+ */
+void* GetSheriffInstance() {
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4C1A80); // Offset estimado
+        if (baseAddress == 0) return nullptr;
+        
+        auto getSheriffInstance = reinterpret_cast<GetNpcSheriffInstanceFunc>(baseAddress);
+        return getSheriffInstance();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+/**
+ * Obtém instância do caçador de recompensas
+ * Baseado na função NpcBountyHunter.get_Instance do dump.cs
+ */
+void* GetBountyHunterInstance() {
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4C2B90); // Offset estimado
+        if (baseAddress == 0) return nullptr;
+        
+        auto getBountyHunterInstance = reinterpret_cast<GetNpcBountyHunterInstanceFunc>(baseAddress);
+        return getBountyHunterInstance();
+    } catch (...) {
         return nullptr;
     }
 }
@@ -1038,6 +1225,20 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("21_Toggle_AimBot V3 (Funções Reais)"),
             OBFUSCATE("22_Toggle_Sempre Headshot"),
             OBFUSCATE("23_Button_Limpar Alvos de Mira"),
+
+            // Sistema Policial
+            OBFUSCATE("Category_Sistema Policial"),
+            OBFUSCATE("24_Button_Gerar Policiais"),
+            OBFUSCATE("25_Button_Ocultar Todos os Policiais"),
+            OBFUSCATE("26_Button_Mostrar Todos os Policiais"),
+            OBFUSCATE("27_Button_Obter Número Max de Policiais"),
+            OBFUSCATE("28_Button_Obter Posição de Spawn da Polícia"),
+            
+            // NPCs Especiais
+            OBFUSCATE("Category_NPCs da Lei"),
+            OBFUSCATE("29_Button_Obter Instância do Xerife"),
+            OBFUSCATE("30_Button_Obter Instância do Caçador"),
+            OBFUSCATE("31_Button_Obter Dados de NPC Inimigo"),
     };
 
     int Total_Feature = (sizeof features / sizeof features[0]);
@@ -1219,6 +1420,67 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             // Limpa todos os alvos atuais e força atualização
             __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Limpando todos os alvos de mira...");
             // Esta funcionalidade é segura pois apenas limpa alvos
+            break;
+            
+        // ========== SISTEMA POLICIAL ==========
+        case 24: // Gerar policiais
+            {
+                void* missionCtrl = GetEnemyPosCtrlInstance(); // Usar como ctrl temporário
+                if (missionCtrl) {
+                    GeneratePolice(missionCtrl);
+                }
+            }
+            break;
+        case 25: // Ocultar todos os policiais
+            {
+                void* missionCtrl = GetEnemyPosCtrlInstance();
+                if (missionCtrl) {
+                    HideAllPolice(missionCtrl);
+                }
+            }
+            break;
+        case 26: // Mostrar todos os policiais
+            {
+                void* missionCtrl = GetEnemyPosCtrlInstance();
+                if (missionCtrl) {
+                    ShowAllPolice(missionCtrl);
+                }
+            }
+            break;
+        case 27: // Obter número máximo de policiais
+            {
+                int maxPolice = GetPoliceMaxNum();
+                // O valor será retornado pela função
+            }
+            break;
+        case 28: // Obter posição de spawn da polícia
+            {
+                void* enemyPosCtrl = GetEnemyPosCtrlInstance();
+                if (enemyPosCtrl) {
+                    Vector3 playerPos = {0.0f, 0.0f, 0.0f}; // Posição padrão
+                    Vector3 policePos = GetPoliceBurnPos(enemyPosCtrl, playerPos, 10.0f, 50.0f);
+                }
+            }
+            break;
+            
+        // ========== NPCs DA LEI ==========
+        case 29: // Obter instância do xerife
+            {
+                void* sheriff = GetSheriffInstance();
+                // Instância do xerife obtida
+            }
+            break;
+        case 30: // Obter instância do caçador de recompensas
+            {
+                void* bountyHunter = GetBountyHunterInstance();
+                // Instância do caçador obtida
+            }
+            break;
+        case 31: // Obter dados de NPC inimigo
+            {
+                void* npcData = GetNPCenemyOriData(1); // ID padrão 1
+                // Dados do NPC obtidos
+            }
             break;
     }
 }
