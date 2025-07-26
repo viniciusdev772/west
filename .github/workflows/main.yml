@@ -39,7 +39,7 @@ jobs:
         run: |
           if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
             echo "Gradle wrapper not found, setting up..."
-            gradle wrapper --gradle-version=8.4
+            gradle wrapper --gradle-version=8.6
           fi
           chmod +x ./gradlew
       
