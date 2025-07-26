@@ -43,9 +43,9 @@ jobs:
           echo "y" | sdkmanager "platforms;android-34"
           echo "y" | sdkmanager "platforms;android-21"
           echo "y" | sdkmanager "build-tools;34.0.0"
-          echo "y" | sdkmanager "ndk;26.1.10909125"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
-          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
+          echo "y" | sdkmanager "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
       
       - name: Create local.properties
         run: |
