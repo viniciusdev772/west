@@ -15,7 +15,7 @@
 
 // Enumeração de tipos de itens do jogo
 enum DropGoodsType {
-    Null = 0,
+    DropNull = 0,
     BloodVial = 1,
     BigBloodVial = 2,
     PistolAmmo = 3,
@@ -100,7 +100,7 @@ enum AimTargetState {
 
 // Enumeração para tipos de player base (do dump.cs)
 enum PlayerBaseType {
-    Null = 0,
+    PlayerNull = 0,
     Cowboy = 1,        // Jogador principal
     Horse = 2,
     MissionPerson = 3,
@@ -203,7 +203,7 @@ void CallSetPlayerOnHorse() {
             __android_log_print(ANDROID_LOG_INFO, "ModMenu", "🐎 Estado GetOnHorse ativado - Jogador montará no cavalo");
             // O estado do jogo se encarregará de montar no cavalo de forma segura
         } else {
-            __android_log_print(ANDROID_LOG_WARNING, "ModMenu", "Aviso: Instância GetOnHorse não disponível");
+            __android_log_print(ANDROID_LOG_WARN, "ModMenu", "Aviso: Instância GetOnHorse não disponível");
         }
     } catch (...) {
         __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Exceção em CallSetPlayerOnHorse");
@@ -229,7 +229,7 @@ void CallSetPlayerOffHorse() {
             __android_log_print(ANDROID_LOG_INFO, "ModMenu", "🐎 Estado GetOffHorse ativado - Jogador desmontará do cavalo");
             // O estado do jogo se encarregará de desmontar do cavalo de forma segura
         } else {
-            __android_log_print(ANDROID_LOG_WARNING, "ModMenu", "Aviso: Instância GetOffHorse não disponível");
+            __android_log_print(ANDROID_LOG_WARN, "ModMenu", "Aviso: Instância GetOffHorse não disponível");
         }
     } catch (...) {
         __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Exceção em CallSetPlayerOffHorse");
@@ -954,15 +954,6 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
         env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
 
     return (ret);
-}
-
-// Função para encontrar e obter a instância do EnemyPosCtrl
-void* GetEnemyPosCtrlInstance() {
-    // Esta função simula a chamada para GetInstance() de EnemyPosCtrl
-    typedef void* (*GetInstanceFunc)();
-    uintptr_t addr_GetInstance = getAbsoluteAddress(targetLibName, 0x2E66C4); // Endereço do GetInstance
-    auto getInstance = reinterpret_cast<GetInstanceFunc>(addr_GetInstance);
-    return getInstance();
 }
 
 /**
