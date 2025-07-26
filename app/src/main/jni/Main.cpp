@@ -467,6 +467,7 @@ void hook_SetDropGoodNumber(int goodType, int num) {
                 "FoxSkin", "GunPart1", "GunPart2", "GunPart3", "GunPart4",
                 "WHISKY", "Gold", "Diamond"
         };
+        
 
         const char* itemName = "Desconhecido";
         if (goodType >= 0 && goodType < 18) {
