@@ -40,10 +40,11 @@ enum DropGoodsType {
 // CORREÇÕES IMPLEMENTADAS V3.0:
 // ✅ SetPlayerOnHorse: Agora usa GetOnHorse.get_Instance() (0x4654C4) - MÉTODO SEGURO
 // ✅ SetPlayerOffHorse: Agora usa GetOffHorse.get_Instance() (0x465150) - MÉTODO SEGURO  
-// ✅ AimBot V4: SISTEMA INTELIGENTE com enums reais do dump.cs
+// ✅ AimBot V4: SISTEMA INTELIGENTE com enums E OFFSETS reais do dump.cs
 // ✅ Proteção Anti-Cowboy: JAMAIS mira em Cowboy = 1 (jogador principal)
 // ✅ Sistema de Prioridades: Ogros(100) > Zumbis(80) > NPCs(60) > Animais(40)
-// ✅ Validação de Alvos: IsValidTarget() + GetTargetPriority() baseado em PlayerBaseType
+// ✅ Offsets Reais: PlayerBaseType baseType; // 0xC (AnimalType animalType; // 0x8)
+// ✅ Validação de Alvos: IsValidTarget() + GetTargetPriority() com offsets corretos
 // ✅ EnemyPosCtrl: Acesso real à lista de inimigos (0x2E66C4)
 // ✅ PlayerBaseType: Enum para distinguir Cowboy, EnemyNPC, Animal, Zombies, etc
 // ✅ Anti-Crash: Estados do jogo ao invés de funções diretas para cavalo
@@ -211,15 +212,14 @@ bool IsValidTarget(void* target, void* playerCtrl) {
     if (!target || target == playerCtrl) return false;
     
     try {
-        // Acesso aos campos de tipo do alvo (assumindo estrutura similar ao jogador)
-        // Offset 0x14 geralmente contém informações de tipo em estruturas Unity
-        PlayerBaseType* baseTypePtr = (PlayerBaseType*)((char*)target + 0x14);
+        // OFFSET REAL DO DUMP.CS: PlayerBaseType baseType; // 0xC
+        PlayerBaseType* baseTypePtr = (PlayerBaseType*)((char*)target + 0xC);
         PlayerBaseType baseType = *baseTypePtr;
         
         // ❌ NUNCA mira no Cowboy (jogador)
         if (baseType == Cowboy) return false;
         
-        // ✅ Alvos válidos por prioridade
+        // ✅ Alvos válidos por prioridade (baseado nos offsets reais)
         return (baseType == Ogre ||         // PRIORIDADE MÁXIMA
                 baseType == Zombies ||      // PRIORIDADE ALTA  
                 baseType == EnemyNPC ||     // PRIORIDADE MÉDIA
@@ -239,10 +239,11 @@ int GetTargetPriority(void* target) {
     if (!target) return 0;
     
     try {
-        PlayerBaseType* baseTypePtr = (PlayerBaseType*)((char*)target + 0x14);
+        // OFFSET REAL DO DUMP.CS: PlayerBaseType baseType; // 0xC
+        PlayerBaseType* baseTypePtr = (PlayerBaseType*)((char*)target + 0xC);
         PlayerBaseType baseType = *baseTypePtr;
         
-        // Sistema de prioridades
+        // Sistema de prioridades baseado nos tipos reais do dump.cs
         switch (baseType) {
             case Ogre:     return 100;  // ⚡ MÁXIMA - Ogros/Chefes
             case Zombies:  return 80;   // ⚡ ALTA - Zumbis
