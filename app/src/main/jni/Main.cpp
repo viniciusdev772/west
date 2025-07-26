@@ -41,7 +41,7 @@ enum DropGoodsType {
 // ✅ SetPlayerOnHorse: Agora usa GetOnHorse.get_Instance() (0x4654C4) - MÉTODO SEGURO
 // ✅ SetPlayerOffHorse: Agora usa GetOffHorse.get_Instance() (0x465150) - MÉTODO SEGURO  
 // ✅ AimBot V3: USA FUNÇÕES REAIS DO DUMP.CS - GetNPCenemyKindIDs(), GetZombiesEnemyKindIDs()
-// ✅ FindNearestEnemy V3: Usa offsets REAIS (0x2E56CC, 0x2E73F4) - NUNCA simula
+// ✅ AimBot V3: Usa CallGetTargetPlayer para obter alvos do jogo - NUNCA simula
 // ✅ Filtro Anti-Self-Target: currentTarget != thisPtr - JAMAIS mira no próprio player
 // ✅ EnemyPosCtrl: Acesso real à lista de inimigos (0x2E66C4)
 // ✅ PlayerBaseType: Enum para distinguir Cowboy, EnemyNPC, Animal, Zombies, etc
@@ -740,10 +740,7 @@ void hook_UpdateAimTarget(void* thisPtr) {
     if (aimBot) {
         __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIMBOT", "🎯 AimBot V3 ativo - verificando alvos seguros");
         
-        // Busca por listas de inimigos reais (sem retornar ponteiros)
-        void* nearestEnemy = FindNearestEnemy(thisPtr);
-        
-        // Obtém alvo atual do jogo
+        // Obtém alvo atual do jogo (o jogo já gerencia a busca de inimigos internamente)
         void* currentTarget = CallGetTargetPlayer(thisPtr);
         
         // FILTRO CRÍTICO: Nunca mira no próprio player
