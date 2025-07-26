@@ -1,22 +1,25 @@
-name: Build Android Native Library
+name: Build Native Library Release
 on:
   workflow_dispatch:
   push:
+    branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 jobs:
   build:
-    name: Build Android App with Native Library
+    name: Build West Gunfighter Native Library
     runs-on: ubuntu-latest
     permissions:
-      contents: write  
+      contents: write
+      
     steps:
-      - name: Checkout code
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 17
+      - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -25,66 +28,117 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        
+      - name: Install Gradle
+        run: |
+          # Install Gradle globally
+          wget -q https://services.gradle.org/distributions/gradle-8.6-bin.zip
+          unzip -q gradle-8.6-bin.zip
+          sudo mv gradle-8.6 /opt/gradle
+          sudo ln -sf /opt/gradle/bin/gradle /usr/local/bin/gradle
+          gradle --version
       
-      - name: Install Android SDK components
+      - name: Install Android SDK Components
         run: |
           echo "y" | sdkmanager "platforms;android-34"
-          echo "y" | sdkmanager "platforms;android-29"
           echo "y" | sdkmanager "platforms;android-21"
           echo "y" | sdkmanager "build-tools;34.0.0"
           echo "y" | sdkmanager "ndk;26.1.10909125"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
-      
-      - name: Setup Gradle wrapper
-        run: |
-          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "Gradle wrapper not found, setting up..."
-            gradle wrapper --gradle-version=8.6
-          fi
-          chmod +x ./gradlew
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
       
       - name: Create local.properties
         run: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
+          cat local.properties
       
-      - name: Build Android project with native library
-        run: ./gradlew :app:assembleDebug --stacktrace
-      
-      - name: Find and copy native libraries
+      - name: Build Native Libraries
         run: |
-          echo "Searching for compiled native libraries..."
-          find . -name "*.so" -type f | head -10
+          echo "🛠️ Building native libraries with Gradle..."
+          gradle externalNativeBuildDebug --info --stacktrace
           
-          # Create output directory
-          mkdir -p artifacts/native-libs
+      - name: Locate and Package Native Libraries
+        run: |
+          echo "🔍 Searching for compiled .so files..."
+          find . -name "*.so" -type f | grep -E "(WestGunfighter|libWest)" || true
           
-          # Copy native libraries if found
-          if find app/build -name "*.so" -type f | grep -q .; then
-            find app/build -name "*.so" -type f -exec cp {} artifacts/native-libs/ \;
-            echo "Native libraries copied to artifacts/native-libs/"
-            ls -la artifacts/native-libs/
+          # Create artifacts directory
+          mkdir -p release-artifacts
+          
+          # Find and copy the main library
+          SO_FILE=$(find app/build -name "*WestGunfighter*.so" -type f | head -1)
+          
+          if [ -n "$SO_FILE" ] && [ -f "$SO_FILE" ]; then
+            echo "✅ Found native library: $SO_FILE"
+            cp "$SO_FILE" release-artifacts/
+            
+            # Get file info
+            ls -la "$SO_FILE"
+            file "$SO_FILE"
+            
+            echo "📦 Library copied to release-artifacts/"
+            ls -la release-artifacts/
           else
-            echo "No native libraries found in build output"
+            echo "❌ Native library not found!"
+            echo "📋 Available .so files:"
+            find app/build -name "*.so" -type f | head -10
             exit 1
           fi
+          
+          # Create release info
+          echo "$(date): Build completed successfully" > release-artifacts/build-info.txt
+          echo "Library: $(basename $SO_FILE)" >> release-artifacts/build-info.txt
+          echo "Size: $(stat -f%z $SO_FILE 2>/dev/null || stat -c%s $SO_FILE) bytes" >> release-artifacts/build-info.txt
       
-      - name: Upload artifacts
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-native-libs
-          path: artifacts/native-libs/
+          name: west-gunfighter-native-lib
+          path: release-artifacts/
+          retention-days: 30
       
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create Automatic Release
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v1
         with:
-          files: artifacts/native-libs/*.so
-          name: Release ${{ github.ref_name }}
+          tag_name: auto-release-${{ github.run_number }}
+          name: "West Gunfighter Native Library - Build #${{ github.run_number }}"
           body: |
-            Automatic build from tag: ${{ github.ref_name }}
+            🚀 **Automatic Release - Build #${{ github.run_number }}**
             
-            This release contains the compiled native libraries for armeabi-v7a architecture.
-            Built using Android Gradle Plugin with NDK.
+            📅 **Build Date:** ${{ github.event.head_commit.timestamp }}
+            🔗 **Commit:** ${{ github.sha }}
+            📝 **Message:** ${{ github.event.head_commit.message }}
+            
+            ## 📦 Contents
+            - `libWestGunfighterHooksVdev.so` - Native library for armeabi-v7a
+            - `build-info.txt` - Build information and details
+            
+            ## 🎯 Usage
+            Extract the .so file and place it in your Android app's `lib/armeabi-v7a/` directory.
+            
+            ---
+            *This release was automatically generated from the latest commit on main branch.*
+          files: |
+            release-artifacts/*.so
+            release-artifacts/build-info.txt
           draft: false
           prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Build Summary
+        run: |
+          echo "## 🎉 Build Completed Successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Build Details:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Run Number:** #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Generated Files:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la release-artifacts/ >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
