@@ -689,20 +689,17 @@ MyPlayerOriData* hook_GetMyPlayerOriData() {
     MyPlayerOriData* data = original_GetMyPlayerOriData();
     if (!data) return nullptr;
 
-    // Aplica hack de velocidade se ativado
+    // Aplica hack de velocidade SEMPRE que os dados são acessados
     if (speedHack) {
-        // Salva valores originais se ainda não foram salvos
-        static float originalWalkSpeed = -1.0f;
-        static float originalRunSpeed = -1.0f;
+        // Valores base do jogo (descobertos através de testes)
+        static const float BASE_WALK = 2.0f;
+        static const float BASE_RUN = 4.0f;
         
-        if (originalWalkSpeed < 0) {
-            originalWalkSpeed = data->walk_speed;
-            originalRunSpeed = data->run_speed;
-        }
-        
-        // Aplica multiplicador
-        data->walk_speed = originalWalkSpeed * speedMultiplier;
-        data->run_speed = originalRunSpeed * speedMultiplier;
+        // Força valores multiplicados TODA VEZ que é chamado
+        data->walk_speed = BASE_WALK * speedMultiplier;
+        data->run_speed = BASE_RUN * speedMultiplier;
+        data->acc = 10.0f * speedMultiplier;  // Aceleração alta
+        data->dec = 5.0f;  // Desaceleração normal
     }
 
     return data;
@@ -723,44 +720,7 @@ float hook_GetReloadTime(void* thisPtr) {
     return originalTime;
 }
 
-/**
- * Aplica hack de velocidade através de patch de memória direto
- * Modifica a velocidade atual do jogador em tempo real
- */
-void ApplySpeedHack() {
-    if (!speedHack) return;
-    
-    static uintptr_t playerInstance = 0;
-    static int frameCounter = 0;
-    
-    frameCounter++;
-    if (frameCounter % 10 != 0) return; // Executa a cada 10 frames para performance
-    
-    try {
-        // Busca instância do jogador através de GetMyPlayerOriData
-        MyPlayerOriData* playerData = GetPlayerOriData();
-        if (!playerData) return;
-        
-        // Força velocidades modificadas diretamente na estrutura
-        static float originalWalk = -1.0f;
-        static float originalRun = -1.0f;
-        
-        if (originalWalk < 0) {
-            originalWalk = playerData->walk_speed;
-            originalRun = playerData->run_speed;
-        }
-        
-        // Aplica multiplicador diretamente
-        playerData->walk_speed = originalWalk * speedMultiplier;
-        playerData->run_speed = originalRun * speedMultiplier;
-        
-        // Força também aceleração para movimento mais responsivo
-        playerData->acc = playerData->acc * speedMultiplier;
-        
-    } catch (...) {
-        // Silencioso - sem logs conforme solicitado
-    }
-}
+
 
 /**
  * Hook para a função UpdateAimTarget
@@ -781,9 +741,6 @@ void hook_UpdateAimTarget(void* thisPtr) {
         __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIM", "Auto-aim ativo - forçando foco");
         CallSetAimState(thisPtr, Aiming_Focus, nullptr, true);
     }
-    
-    // Aplica hack de velocidade a cada frame
-    ApplySpeedHack();
     
     // Se aimBot estiver ativo, usa abordagem segura
     if (aimBot) {
