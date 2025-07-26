@@ -32,8 +32,8 @@ jobs:
           echo "y" | sdkmanager "platforms;android-29"
           echo "y" | sdkmanager "platforms;android-21"
           echo "y" | sdkmanager "build-tools;34.0.0"
-          echo "y" | sdkmanager "ndk;25.2.9519653"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "y" | sdkmanager "ndk;26.1.10909125"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
       
       - name: Setup Gradle wrapper
         run: |

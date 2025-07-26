@@ -40,11 +40,20 @@ if (-not $androidHome) {
     }
 }
 
-# Verificar NDK
-$ndkPath = "$androidHome\ndk\25.2.9519653"
-if (-not (Test-Path $ndkPath)) {
-    Write-Host "ERRO: Android NDK não encontrado em $ndkPath" -ForegroundColor Red
-    Write-Host "Por favor, instale o Android NDK versão 25.2.9519653 através do SDK Manager" -ForegroundColor Red
+# Encontrar versão do NDK instalada
+$ndkPath = $null
+$ndkBaseDir = "$androidHome\ndk"
+if (Test-Path $ndkBaseDir) {
+    $ndkVersions = Get-ChildItem -Path $ndkBaseDir -Directory | Sort-Object Name -Descending
+    if ($ndkVersions.Count -gt 0) {
+        $ndkPath = $ndkVersions[0].FullName
+        Write-Host "NDK encontrado: $ndkPath" -ForegroundColor Green
+    }
+}
+
+if (-not $ndkPath) {
+    Write-Host "ERRO: Nenhuma versão do Android NDK encontrada em $ndkBaseDir" -ForegroundColor Red
+    Write-Host "Por favor, instale o Android NDK através do SDK Manager" -ForegroundColor Red
     Read-Host "Pressione Enter para sair"
     exit 1
 }

@@ -7,12 +7,35 @@ echo  West Gunfighter Hooks - vdev
 echo ============================================
 echo.
 
-:: Verificar se o gradlew existe
+:: Verificar e corrigir o Gradle wrapper
 if not exist "gradlew.bat" (
     echo ERRO: gradlew.bat nao encontrado no diretorio atual
     echo Certifique-se de estar executando este script na raiz do projeto
     pause
     exit /b 1
+)
+
+:: Verificar se o gradle wrapper esta funcionando corretamente
+if not exist "gradle\wrapper\gradle-wrapper.jar" (
+    echo AVISO: Gradle wrapper corrompido ou faltando
+    echo Tentando corrigir o wrapper...
+    
+    if exist "fix-gradle-wrapper.cmd" (
+        echo Executando corretor do wrapper...
+        call fix-gradle-wrapper.cmd
+    ) else (
+        :: Usar gradle global se disponivel
+        where gradle >nul 2>&1
+        if !ERRORLEVEL! equ 0 (
+            echo Usando Gradle global para recriar o wrapper...
+            gradle wrapper --gradle-version=8.6
+        ) else (
+            echo ERRO: Gradle nao encontrado globalmente
+            echo Crie o arquivo fix-gradle-wrapper.cmd ou instale o Gradle
+            pause
+            exit /b 1
+        )
+    )
 )
 
 :: Verificar se o Android SDK esta configurado
@@ -33,14 +56,22 @@ if "%ANDROID_HOME%"=="" (
     )
 )
 
-:: Verificar se o NDK existe
-set "NDK_PATH=%ANDROID_HOME%\ndk\25.2.9519653"
-if not exist "%NDK_PATH%" (
-    echo ERRO: Android NDK nao encontrado em %NDK_PATH%
-    echo Por favor, instale o Android NDK versao 25.2.9519653 atraves do SDK Manager
+:: Encontrar versao do NDK instalada
+set "NDK_PATH="
+for /d %%i in ("%ANDROID_HOME%\ndk\*") do (
+    set "NDK_PATH=%%i"
+    goto :found_ndk
+)
+:found_ndk
+
+if "%NDK_PATH%"=="" (
+    echo ERRO: Nenhuma versao do Android NDK encontrada em %ANDROID_HOME%\ndk\
+    echo Por favor, instale o Android NDK atraves do SDK Manager
     pause
     exit /b 1
 )
+
+echo NDK encontrado: %NDK_PATH%
 
 :: Definir variaveis de ambiente necessarias
 set "ANDROID_NDK_HOME=%NDK_PATH%"
