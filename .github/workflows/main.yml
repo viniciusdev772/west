@@ -98,28 +98,37 @@ jobs:
           path: release-artifacts/
           retention-days: 30
       
-      - name: Create Automatic Release
+      - name: Delete Previous Latest Release
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        run: |
+          gh release delete latest --yes || echo "No previous 'latest' release found"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Create Latest Release
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: auto-release-${{ github.run_number }}
-          name: "West Gunfighter Native Library - Build #${{ github.run_number }}"
+          tag_name: latest
+          name: "West Gunfighter Native Library - Latest"
           body: |
-            🚀 **Automatic Release - Build #${{ github.run_number }}**
+            🚀 **Latest Build - Always Updated**
             
             📅 **Build Date:** ${{ github.event.head_commit.timestamp }}
             🔗 **Commit:** ${{ github.sha }}
             📝 **Message:** ${{ github.event.head_commit.message }}
+            🏗️ **Build Number:** #${{ github.run_number }}
             
-            ## 📦 Contents
-            - `libWestGunfighterHooksVdev.so` - Native library for armeabi-v7a
-            - `build-info.txt` - Build information and details
+            ## 📦 Direct Download Links
+            - **Native Library:** [libWestGunfighterHooksVdev.so](https://github.com/viniciusdev772/west/releases/download/latest/libWestGunfighterHooksVdev.so)
+            - **Build Info:** [build-info.txt](https://github.com/viniciusdev772/west/releases/download/latest/build-info.txt)
             
             ## 🎯 Usage
             Extract the .so file and place it in your Android app's `lib/armeabi-v7a/` directory.
             
             ---
-            *This release was automatically generated from the latest commit on main branch.*
+            ⚠️ **Note:** This release is automatically updated with each new build. The `latest` tag always points to the most recent version.
           files: |
             release-artifacts/*.so
             release-artifacts/build-info.txt
