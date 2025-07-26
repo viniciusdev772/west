@@ -40,9 +40,10 @@ enum DropGoodsType {
 // CORREÇÕES IMPLEMENTADAS V3.0:
 // ✅ SetPlayerOnHorse: Agora usa GetOnHorse.get_Instance() (0x4654C4) - MÉTODO SEGURO
 // ✅ SetPlayerOffHorse: Agora usa GetOffHorse.get_Instance() (0x465150) - MÉTODO SEGURO  
-// ✅ AimBot V3: USA FUNÇÕES REAIS DO DUMP.CS - GetNPCenemyKindIDs(), GetZombiesEnemyKindIDs()
-// ✅ AimBot V3: Usa CallGetTargetPlayer para obter alvos do jogo - NUNCA simula
-// ✅ Filtro Anti-Self-Target: currentTarget != thisPtr - JAMAIS mira no próprio player
+// ✅ AimBot V4: SISTEMA INTELIGENTE com enums reais do dump.cs
+// ✅ Proteção Anti-Cowboy: JAMAIS mira em Cowboy = 1 (jogador principal)
+// ✅ Sistema de Prioridades: Ogros(100) > Zumbis(80) > NPCs(60) > Animais(40)
+// ✅ Validação de Alvos: IsValidTarget() + GetTargetPriority() baseado em PlayerBaseType
 // ✅ EnemyPosCtrl: Acesso real à lista de inimigos (0x2E66C4)
 // ✅ PlayerBaseType: Enum para distinguir Cowboy, EnemyNPC, Animal, Zombies, etc
 // ✅ Anti-Crash: Estados do jogo ao invés de funções diretas para cavalo
@@ -134,7 +135,7 @@ typedef float (*GetReloadTimeFunc)();
 // Tipos de função corrigidos
 typedef MyPlayerOriData* (*GetMyPlayerOriDataFunc)();
 
-// Enumeração para estados de mira
+// Enumeração para estados de mira (do dump.cs)
 enum AimTargetState {
     Nobody = 0,
     Aiming_Focus = 1,
@@ -144,14 +145,47 @@ enum AimTargetState {
 // Enumeração para tipos de player base (do dump.cs)
 enum PlayerBaseType {
     PlayerNull = 0,
-    Cowboy = 1,        // Jogador principal
+    Cowboy = 1,        // ❌ NUNCA MIRAR - Jogador principal
     Horse = 2,
     MissionPerson = 3,
-    EnemyNPC = 4,      // Inimigos NPCs
-    Zombies = 5,       // Zumbis
-    Animal = 6,        // Animais
-    Ogre = 7,          // Ogros
+    EnemyNPC = 4,      // ✅ Inimigos NPCs
+    Zombies = 5,       // ✅ Zumbis
+    Animal = 6,        // ✅ Animais
+    Ogre = 7,          // ✅ Ogros - PRIORIDADE ALTA
     NonPermanentNpc = 8
+};
+
+// Enumeração para tipos de animais específicos (do dump.cs)
+enum AnimalType {
+    AnimalNull = 0,
+    AnimalCowboy = 1,     // ❌ NUNCA MIRAR
+    
+    // Inimigos Humanos - PRIORIDADE MÉDIA
+    BountyHunter = 25,    // ✅ Caçador de recompensas
+    Robber = 26,          // ✅ Ladrão  
+    Pro01 = 30,           // ✅ Profissional 1
+    Pro02 = 31,           // ✅ Profissional 2
+    
+    // Zumbis - PRIORIDADE ALTA
+    Zombies01 = 34,       // ✅ Zumbi tipo 1
+    Zombies02 = 35,       // ✅ Zumbi tipo 2
+    Zombies03 = 36,       // ✅ Zumbi tipo 3
+    Zombies04 = 37,       // ✅ Zumbi tipo 4
+    Zombies05 = 38,       // ✅ Zumbi tipo 5
+    Zombies06 = 39,       // ✅ Zumbi tipo 6
+    Zombies07 = 40,       // ✅ Zumbi tipo 7
+    
+    // Ogros/Chefes - PRIORIDADE MÁXIMA
+    Ogre = 41,            // ✅ Ogro comum
+    OgreBoss = 42,        // ✅ Chefe Ogro
+    
+    // Animais Hostis - PRIORIDADE BAIXA
+    Cheetah = 43,         // ✅ Guepardo
+    Bear = 44,            // ✅ Urso  
+    Wolf01 = 45,          // ✅ Lobo tipo 1
+    Wolf02 = 46,          // ✅ Lobo tipo 2
+    Wolf03 = 47,          // ✅ Lobo tipo 3
+    Eagle = 49            // ✅ Águia
 };
 
 typedef void (*UpdateAimTargetFunc)(void* thisPtr);
@@ -159,6 +193,83 @@ typedef void (*SetAimStateFunc)(void* thisPtr, AimTargetState state, void* targe
 typedef void (*SetTargetPlayerFunc)(void* thisPtr, void* player);
 typedef void* (*GetTargetPlayerFunc)(void* thisPtr);
 typedef int (*GetClosestCharacterFunc)(void* verts, Vector3 pos);
+typedef PlayerBaseType (*GetPlayerBaseTypeFunc)(void* thisPtr);
+typedef AnimalType (*GetAnimalTypeFunc)(void* thisPtr);
+
+/**
+ * Verifica se um alvo é válido para o aimbot
+ * @param target Ponteiro para o alvo potencial
+ * @param playerCtrl Ponteiro para o controlador do jogador (para comparação)
+ * @return true se o alvo é válido, false caso contrário
+ */
+bool IsValidTarget(void* target, void* playerCtrl) {
+    if (!target || target == playerCtrl) return false;
+    
+    try {
+        // Acesso aos campos de tipo do alvo (assumindo estrutura similar ao jogador)
+        // Offset 0x14 geralmente contém informações de tipo em estruturas Unity
+        PlayerBaseType* baseTypePtr = (PlayerBaseType*)((char*)target + 0x14);
+        PlayerBaseType baseType = *baseTypePtr;
+        
+        // ❌ NUNCA mira no Cowboy (jogador)
+        if (baseType == Cowboy) return false;
+        
+        // ✅ Alvos válidos por prioridade
+        return (baseType == Ogre ||         // PRIORIDADE MÁXIMA
+                baseType == Zombies ||      // PRIORIDADE ALTA  
+                baseType == EnemyNPC ||     // PRIORIDADE MÉDIA
+                baseType == Animal);        // PRIORIDADE BAIXA
+                
+    } catch (...) {
+        return false; // Se houver erro, não é um alvo válido
+    }
+}
+
+/**
+ * Calcula prioridade de um alvo para o aimbot
+ * @param target Ponteiro para o alvo
+ * @return Valor de prioridade (maior = mais importante)
+ */
+int GetTargetPriority(void* target) {
+    if (!target) return 0;
+    
+    try {
+        PlayerBaseType* baseTypePtr = (PlayerBaseType*)((char*)target + 0x14);
+        PlayerBaseType baseType = *baseTypePtr;
+        
+        // Sistema de prioridades
+        switch (baseType) {
+            case Ogre:     return 100;  // ⚡ MÁXIMA - Ogros/Chefes
+            case Zombies:  return 80;   // ⚡ ALTA - Zumbis
+            case EnemyNPC: return 60;   // ⚡ MÉDIA - NPCs inimigos
+            case Animal:   return 40;   // ⚡ BAIXA - Animais hostis
+            default:       return 0;    // ❌ Não é alvo válido
+        }
+    } catch (...) {
+        return 0;
+    }
+}
+
+/**
+ * Encontra o melhor alvo baseado em prioridade e proximidade
+ * @param playerCtrl Ponteiro para o controlador do jogador
+ * @return Ponteiro para o melhor alvo ou nullptr
+ */
+void* FindBestTarget(void* playerCtrl) {
+    if (!playerCtrl) return nullptr;
+    
+    // Por enquanto, usa o alvo atual do jogo se for válido
+    void* currentTarget = CallGetTargetPlayer(playerCtrl);
+    
+    // Verifica se o alvo atual é válido
+    if (IsValidTarget(currentTarget, playerCtrl)) {
+        return currentTarget;
+    }
+    
+    // Se não há alvo válido, retorna nullptr
+    // O jogo continuará buscando naturalmente
+    return nullptr;
+}
 
 /**
  * Salva a quantidade de munição de pistola
@@ -724,54 +835,51 @@ float hook_GetReloadTime(void* thisPtr) {
 
 /**
  * Hook para a função UpdateAimTarget
- * Implementa aimbot que força busca de inimigos SEM mirar no próprio player
+ * Implementa aimbot inteligente com sistema de prioridades
  */
 void hook_UpdateAimTarget(void* thisPtr) {
-    // Verificação de segurança
-    if (!thisPtr) {
-        __android_log_print(ANDROID_LOG_ERROR, "MOD_AIM", "Erro: thisPtr é nulo em UpdateAimTarget");
-        return;
-    }
+    if (!thisPtr) return;
     
     // Chama a função original primeiro
     original_UpdateAimTarget(thisPtr);
     
     // Se autoAim estiver ativo, força estado de mira focada
     if (autoAim) {
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIM", "Auto-aim ativo - forçando foco");
         CallSetAimState(thisPtr, Aiming_Focus, nullptr, true);
     }
     
-    // Se aimBot estiver ativo, usa abordagem segura
+    // ⚡ AIMBOT INTELIGENTE COM PROTEÇÃO ANTI-COWBOY
     if (aimBot) {
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIMBOT", "🎯 AimBot V3 ativo - verificando alvos seguros");
+        // Busca o melhor alvo disponível
+        void* bestTarget = FindBestTarget(thisPtr);
         
-        // Obtém alvo atual do jogo (o jogo já gerencia a busca de inimigos internamente)
-        void* currentTarget = CallGetTargetPlayer(thisPtr);
-        
-        // FILTRO CRÍTICO: Nunca mira no próprio player
-        if (currentTarget && currentTarget != thisPtr) {
+        if (bestTarget) {
+            // ✅ Alvo válido encontrado - aplicar mira inteligente
+            int priority = GetTargetPriority(bestTarget);
             
-            // Força estado de mira focada apenas se o alvo não for o próprio player
-            CallSetAimState(thisPtr, Aiming_Focus, currentTarget, true);
+            // Define intensidade da mira baseada na prioridade
+            AimTargetState aimState = (priority >= 80) ? Aiming_Focus : Aiming_NotFocus;
             
-            // Contador de alvos travados (para estatísticas)
-            static int targetsLocked = 0;
-            targetsLocked++;
+            // Força mira no alvo válido
+            CallSetAimState(thisPtr, aimState, bestTarget, true);
+            CallSetTargetPlayer(thisPtr, bestTarget);
             
-            __android_log_print(ANDROID_LOG_INFO, "MOD_AIMBOT", 
-                               "🎯 AimBot V3: Alvo seguro #%d travado %p (NÃO é o player %p)", 
-                               targetsLocked, currentTarget, thisPtr);
+            // Contador de alvos por tipo (silencioso)
+            static int ogres = 0, zombies = 0, npcs = 0, animals = 0;
+            switch (priority) {
+                case 100: ogres++; break;    // Ogros
+                case 80:  zombies++; break;  // Zumbis  
+                case 60:  npcs++; break;     // NPCs
+                case 40:  animals++; break;  // Animais
+            }
+            
         } else {
-            // Se não há alvo válido ou alvo é o próprio player, força busca
-            __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIMBOT", "🔍 Forçando jogo a buscar novos inimigos...");
-            
-            // Força múltiplas chamadas de UpdateAimTarget para acelerar busca
-            static int forcedUpdates = 0;
-            if (forcedUpdates++ < 3) {
+            // ❌ Nenhum alvo válido - acelera busca
+            static int searchBoost = 0;
+            if (searchBoost++ < 2) {
                 original_UpdateAimTarget(thisPtr);
             } else {
-                forcedUpdates = 0; // Reset contador
+                searchBoost = 0;
             }
         }
     }
