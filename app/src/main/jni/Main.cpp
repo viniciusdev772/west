@@ -78,6 +78,26 @@ struct Vector3 {
     float z;
 };
 
+// Estrutura para dados de origem do jogador (correta conforme dump.cs)
+struct MyPlayerOriData {
+    void* vTable;           // 0x0
+    int unknown1;          // 0x4
+    const char* name;      // 0x8
+    int blood;             // 0xC
+    int gun_ID;            // 0x10
+    int pistol_ID;         // 0x14
+    int long_gun_ID;       // 0x18
+    int knife_ID;          // 0x1C
+    int head_ID;           // 0x20
+    int body_ID;           // 0x24
+    int pant_ID;           // 0x28
+    int horse_ID;          // 0x2C
+    float walk_speed;      // 0x30
+    float run_speed;       // 0x34
+    float acc;             // 0x38
+    float dec;             // 0x3C
+};
+
 // Tipos de função para as chamadas de salvamento
 typedef void (*SaveGoldFunc)(int);
 typedef void (*SaveGemFunc)(int);
@@ -92,6 +112,9 @@ typedef void* (*GetOffHorseInstanceFunc)();
 typedef void* (*EnemyPosCtrlGetInstanceFunc)();
 typedef void (*ReloadBulletsFunc)();
 typedef float (*GetReloadTimeFunc)();
+
+// Tipos de função corrigidos
+typedef MyPlayerOriData* (*GetMyPlayerOriDataFunc)();
 
 // Enumeração para estados de mira
 enum AimTargetState {
@@ -572,10 +595,8 @@ int hook_GetDropGoodNumber(int goodType) {
 // Ponteiro para função original SetDropGoodNumber
 void (*original_SetDropGoodNumber)(int goodType, int num);
 
-// Ponteiros para funções de velocidade e recarga
+// Ponteiros para funções de recarga
 float (*original_GetReloadTime)(void* thisPtr);
-float (*original_GetWalkSpeed)(void* thisPtr);
-float (*original_GetRunSpeed)(void* thisPtr);
 
 // Ponteiros para funções de mira
 void (*original_UpdateAimTarget)(void* thisPtr);
@@ -609,7 +630,76 @@ void hook_SetDropGoodNumber(int goodType, int num) {
     original_SetDropGoodNumber(goodType, num);
 }
 
-// ================ HOOKS PARA VELOCIDADE E RECARGA =================
+// ================ HOOKS PARA VELOCIDADE CORRIGIDOS =================
+
+// Ponteiros para funções originais (removendo as inexistentes)
+MyPlayerOriData* (*original_GetMyPlayerOriData)();
+
+/**
+ * Obtém os dados de origem do jogador (incluindo velocidades)
+ * @return Ponteiro para MyPlayerOriData ou nullptr
+ */
+MyPlayerOriData* GetPlayerOriData() {
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4972F4); // GetMyPlayerOriData()
+        if (baseAddress == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_SPEED", "Erro: Endereço inválido para GetMyPlayerOriData");
+            return nullptr;
+        }
+        
+        auto getPlayerOriData = reinterpret_cast<GetMyPlayerOriDataFunc>(baseAddress);
+        MyPlayerOriData* playerData = getPlayerOriData();
+        
+        if (playerData) {
+            __android_log_print(ANDROID_LOG_DEBUG, "MOD_SPEED", 
+                               "Dados do jogador obtidos: walk_speed=%.2f, run_speed=%.2f", 
+                               playerData->walk_speed, playerData->run_speed);
+        }
+        
+        return playerData;
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_SPEED", "Exceção ao obter dados de origem do jogador");
+        return nullptr;
+    }
+}
+
+/**
+ * Hook para a função GetMyPlayerOriData
+ * Modifica as velocidades quando o hack está ativado
+ */
+MyPlayerOriData* hook_GetMyPlayerOriData() {
+    __android_log_print(ANDROID_LOG_DEBUG, "MOD_SPEED", "Acessando MyPlayerOriData...");
+    MyPlayerOriData* data = original_GetMyPlayerOriData();
+    if (!data) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_SPEED", "Erro: Ponteiro para MyPlayerOriData é nulo.");
+        return nullptr;
+    }
+
+    // Aplica hack de velocidade se ativado
+    if (speedHack) {
+        // Salva valores originais se ainda não foram salvos
+        static float originalWalkSpeed = -1.0f;
+        static float originalRunSpeed = -1.0f;
+        
+        if (originalWalkSpeed < 0) {
+            originalWalkSpeed = data->walk_speed;
+            originalRunSpeed = data->run_speed;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_SPEED", 
+                               "Velocidades originais salvas: walk=%.2f, run=%.2f", 
+                               originalWalkSpeed, originalRunSpeed);
+        }
+        
+        // Aplica multiplicador
+        data->walk_speed = originalWalkSpeed * speedMultiplier;
+        data->run_speed = originalRunSpeed * speedMultiplier;
+        
+        __android_log_print(ANDROID_LOG_DEBUG, "MOD_SPEED", 
+                           "Velocidades modificadas: walk=%.2f, run=%.2f (x%.1f)", 
+                           data->walk_speed, data->run_speed, speedMultiplier);
+    }
+
+    return data;
+}
 
 /**
  * Hook para a função GetReloadTime
@@ -624,128 +714,6 @@ float hook_GetReloadTime(void* thisPtr) {
     }
     
     return originalTime;
-}
-
-/**
- * Hook para a função GetWalkSpeed
- * Modifica a velocidade de caminhada
- */
-float hook_GetWalkSpeed(void* thisPtr) {
-    float originalSpeed = original_GetWalkSpeed(thisPtr);
-    
-    if (speedHack) {
-        float modifiedSpeed = originalSpeed * speedMultiplier;
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_SPEED", 
-                            "Velocidade caminhada modificada: %.2f -> %.2f", 
-                            originalSpeed, modifiedSpeed);
-        return modifiedSpeed;
-    }
-    
-    return originalSpeed;
-}
-
-/**
- * Hook para a função GetRunSpeed
- * Modifica a velocidade de corrida
- */
-float hook_GetRunSpeed(void* thisPtr) {
-    float originalSpeed = original_GetRunSpeed(thisPtr);
-    
-    if (speedHack) {
-        float modifiedSpeed = originalSpeed * speedMultiplier;
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_SPEED", 
-                            "Velocidade corrida modificada: %.2f -> %.2f", 
-                            originalSpeed, modifiedSpeed);
-        return modifiedSpeed;
-    }
-    
-    return originalSpeed;
-}
-
-// ================ HOOKS PARA SISTEMA DE MIRA =================
-
-/**
- * Busca inimigo mais próximo usando funções REAIS do dump.cs
- * @param playerCtrl Ponteiro para o controlador do jogador
- * @return Ponteiro para inimigo mais próximo ou nullptr
- */
-void* FindNearestEnemy(void* playerCtrl) {
-    if (!playerCtrl) {
-        return nullptr;
-    }
-    
-    static void* lastFoundEnemy = nullptr;
-    static int searchCooldown = 0;
-    static int currentEnemyType = 0; // 0=NPCs, 1=Zombies, 2=Ogres
-    
-    // Cooldown para evitar busca excessiva
-    if (searchCooldown > 0) {
-        searchCooldown--;
-        return lastFoundEnemy;
-    }
-    
-    // Reset cooldown (busca a cada 30 frames ~0.5s)
-    searchCooldown = 30;
-    
-    try {
-        // Rotaciona entre tipos de inimigos para encontrar diferentes alvos
-        currentEnemyType = (currentEnemyType + 1) % 3;
-        
-        typedef void* (*GetEnemyListFunc)();
-        uintptr_t baseAddress = 0;
-        
-        // Seleciona função real baseada no tipo de inimigo
-        switch (currentEnemyType) {
-            case 0: // NPCs inimigos - GetNPCenemyKindIDs() offset: 0x2E56CC
-                baseAddress = getAbsoluteAddress(targetLibName, 0x2E56CC);
-                __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIMBOT", "🎯 Buscando NPCs inimigos...");
-                break;
-            case 1: // Zumbis - GetZombiesEnemyKindIDs() offset: 0x2E73F4  
-                baseAddress = getAbsoluteAddress(targetLibName, 0x2E73F4);
-                __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIMBOT", "🧟 Buscando Zumbis...");
-                break;
-            case 2: // Ogros - usar EnemyPosCtrl
-                void* enemyPosCtrl = GetEnemyPosCtrlInstance();
-                if (enemyPosCtrl) {
-                    __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIMBOT", "👹 Buscando através de EnemyPosCtrl...");
-                    // EnemyPosCtrl tem List<EnemyPos> listPosition no offset 0xC
-                    // Por segurança, vamos apenas registrar que encontramos o controlador
-                    lastFoundEnemy = enemyPosCtrl; // Temporário - não é um inimigo real
-                    return nullptr; // Não retorna controlador como inimigo
-                }
-                return nullptr;
-        }
-        
-        if (baseAddress == 0) {
-            __android_log_print(ANDROID_LOG_ERROR, "MOD_AIMBOT", "❌ Endereço inválido para função de lista de inimigos");
-            return nullptr;
-        }
-        
-        auto getEnemyList = reinterpret_cast<GetEnemyListFunc>(baseAddress);
-        void* enemyList = getEnemyList();
-        
-        if (enemyList) {
-            __android_log_print(ANDROID_LOG_INFO, "MOD_AIMBOT", "✅ Lista de inimigos obtida: %p", enemyList);
-            
-            // IMPORTANTE: A lista contém IDs, não ponteiros diretos
-            // Para fins de demonstração, usamos a lista como indicador de que há inimigos
-            // Em implementação real, iteraríamos pelos IDs e buscaríamos as instâncias
-            
-            // Por segurança, retornamos nullptr e deixamos o jogo encontrar alvos naturalmente
-            // mas registramos que há inimigos disponíveis
-            __android_log_print(ANDROID_LOG_INFO, "MOD_AIMBOT", "🎯 Inimigos detectados - aguardando jogo definir alvo");
-            return nullptr;
-            
-        } else {
-            __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIMBOT", "🔍 Nenhuma lista de inimigos encontrada para tipo %d", currentEnemyType);
-            return nullptr;
-        }
-        
-    } catch (...) {
-        __android_log_print(ANDROID_LOG_ERROR, "MOD_AIMBOT", "❌ Erro crítico na busca real de inimigos");
-        lastFoundEnemy = nullptr;
-        return nullptr;
-    }
 }
 
 /**
@@ -906,8 +874,10 @@ void *hack_thread(void *) {
     MSHookFunction((void *) addr_GetReloadTime, (void *) &hook_GetReloadTime,
                    (void **) &original_GetReloadTime);
 
-    // Nota: Os hooks de velocidade serão implementados através de modificação de memória
-    // pois walk_speed e run_speed são campos de struct, não funções
+    // Hook para dados de origem do jogador (inclui velocidades)
+    uintptr_t addr_GetMyPlayerOriData = getAbsoluteAddress(targetLibName, 0x4972F4);
+    MSHookFunction((void *) addr_GetMyPlayerOriData, (void *) &hook_GetMyPlayerOriData,
+                   (void **) &original_GetMyPlayerOriData);
 
     // ====== Hooks do sistema de mira ======
 
