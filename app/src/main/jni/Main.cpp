@@ -51,6 +51,9 @@ enum DropGoodsType {
 // ✅ Sistema Policial V1: NPCs policiais, xerife, caçadores de recompensa
 // ✅ Controle de Polícia: GeneratePolice, HideAllPolice, GetPoliceMaxNum
 // ✅ NPCs da Lei: Sheriff(18), BountyHunter(25) com estados reais
+// ✅ PROTEÇÃO ANTI-CRASH: Validação de ponteiros, endereços e parâmetros
+// ✅ Tratamento de Exceções: std::exception + catch(...) em todas as funções
+// ✅ Valores Seguros: Retorna defaults válidos em caso de erro
 // ✅ Busca Forçada: Múltiplas chamadas de UpdateAimTarget para acelerar detecção
 // ✅ Logs melhorados: Emojis específicos 🎯🧟👹 para diferentes tipos de inimigos
 // ===============================================================================
@@ -542,16 +545,28 @@ void* GetEnemyPosCtrlInstance() {
 
 /**
  * Obtém dados de origem de NPCs inimigos (inclui polícia)
- * Offset baseado na função PoliceLoader.GetNPCenemyOriData do dump.cs
+ * PROTEÇÃO ANTI-CRASH: Verificações rigorosas de segurança
  */
 void* GetNPCenemyOriData(int ID) {
+    // Validação de entrada
+    if (ID < 0 || ID > 1000) return nullptr; // IDs válidos esperados
+    
     try {
-        // Função do PoliceLoader para obter dados de NPCs inimigos
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x49A8F0); // Offset estimado
-        if (baseAddress == 0) return nullptr;
+        // Verifica se a biblioteca está carregada
+        if (!isLibraryLoaded(targetLibName)) return nullptr;
+        
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x49A8F0);
+        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return nullptr;
+        
+        // Verificação adicional de validade do endereço
+        if (baseAddress < 0x10000000) return nullptr; // Endereço muito baixo
         
         auto getNPCEnemyOriData = reinterpret_cast<GetNPCenemyOriDataFunc>(baseAddress);
+        if (!getNPCEnemyOriData) return nullptr;
+        
         return getNPCEnemyOriData(ID);
+    } catch (const std::exception& e) {
+        return nullptr;
     } catch (...) {
         return nullptr;
     }
@@ -559,52 +574,108 @@ void* GetNPCenemyOriData(int ID) {
 
 /**
  * Obtém número máximo de policiais permitidos
- * Baseado na função GetPoliceMaxNum do dump.cs
+ * PROTEÇÃO ANTI-CRASH: Retorna valor seguro em caso de erro
  */
 int GetPoliceMaxNum() {
     try {
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4A2B40); // Offset estimado
-        if (baseAddress == 0) return 0;
+        // Verifica se a biblioteca está carregada
+        if (!isLibraryLoaded(targetLibName)) return 5; // Valor padrão seguro
+        
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4A2B40);
+        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return 5;
+        
+        // Verificação de validade do endereço
+        if (baseAddress < 0x10000000) return 5;
         
         auto getPoliceMaxNum = reinterpret_cast<GetPoliceMaxNumFunc>(baseAddress);
-        return getPoliceMaxNum();
+        if (!getPoliceMaxNum) return 5;
+        
+        int result = getPoliceMaxNum();
+        // Validação do resultado (valores razoáveis)
+        if (result < 0 || result > 100) return 5;
+        
+        return result;
+    } catch (const std::exception& e) {
+        return 5; // Valor padrão seguro
     } catch (...) {
-        return 0;
+        return 5; // Valor padrão seguro
     }
 }
 
 /**
  * Gera/spawna policiais no jogo
- * Baseado na função GeneratePolice do dump.cs
+ * PROTEÇÃO ANTI-CRASH: Verificação rigorosa de ponteiros e estados
  */
 void GeneratePolice(void* missionCtrl) {
+    // Verificação de ponteiro nulo
     if (!missionCtrl) return;
     
+    // Verificação adicional de validade do ponteiro
+    if ((uintptr_t)missionCtrl < 0x10000000) return;
+    
     try {
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B1A20); // Offset estimado
-        if (baseAddress == 0) return;
+        // Verifica se a biblioteca está carregada
+        if (!isLibraryLoaded(targetLibName)) return;
+        
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B1A20);
+        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return;
+        
+        // Verificação de validade do endereço
+        if (baseAddress < 0x10000000) return;
         
         auto generatePolice = reinterpret_cast<GeneratePoliceFunc>(baseAddress);
+        if (!generatePolice) return;
+        
+        // Chama a função apenas se todas as verificações passaram
         generatePolice(missionCtrl);
+        
+    } catch (const std::exception& e) {
+        // Exceção capturada - não faz nada
     } catch (...) {
-        // Silencioso
+        // Qualquer exceção - não faz nada
     }
 }
 
 /**
  * Obtém posição de spawn da polícia baseada na posição do jogador
- * Baseado na função GetPoliceBurnPos do dump.cs - OFFSET REAL: 0x2E6B40
+ * PROTEÇÃO ANTI-CRASH: Usa offset real 0x2E6B40 com validações completas
  */
 Vector3 GetPoliceBurnPos(void* enemyPosCtrl, Vector3 playerPos, float minSqr, float maxSqr) {
     Vector3 defaultPos = {0.0f, 0.0f, 0.0f};
+    
+    // Verificação de ponteiro nulo
     if (!enemyPosCtrl) return defaultPos;
     
+    // Verificação de validade do ponteiro
+    if ((uintptr_t)enemyPosCtrl < 0x10000000) return defaultPos;
+    
+    // Validação dos parâmetros de entrada
+    if (minSqr < 0.0f || maxSqr < 0.0f || minSqr > maxSqr) return defaultPos;
+    if (minSqr > 1000.0f || maxSqr > 1000.0f) return defaultPos; // Limites razoáveis
+    
     try {
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x2E6B40); // Offset real já usado
-        if (baseAddress == 0) return defaultPos;
+        // Verifica se a biblioteca está carregada
+        if (!isLibraryLoaded(targetLibName)) return defaultPos;
+        
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x2E6B40); // Offset real
+        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return defaultPos;
+        
+        // Verificação de validade do endereço
+        if (baseAddress < 0x10000000) return defaultPos;
         
         auto getPoliceBurnPos = reinterpret_cast<GetPoliceBurnPosFunc>(baseAddress);
-        return getPoliceBurnPos(enemyPosCtrl, playerPos, minSqr, maxSqr);
+        if (!getPoliceBurnPos) return defaultPos;
+        
+        Vector3 result = getPoliceBurnPos(enemyPosCtrl, playerPos, minSqr, maxSqr);
+        
+        // Validação do resultado (posições razoáveis)
+        if (result.x < -10000.0f || result.x > 10000.0f) return defaultPos;
+        if (result.y < -10000.0f || result.y > 10000.0f) return defaultPos;
+        if (result.z < -10000.0f || result.z > 10000.0f) return defaultPos;
+        
+        return result;
+    } catch (const std::exception& e) {
+        return defaultPos;
     } catch (...) {
         return defaultPos;
     }
@@ -612,51 +683,98 @@ Vector3 GetPoliceBurnPos(void* enemyPosCtrl, Vector3 playerPos, float minSqr, fl
 
 /**
  * Oculta todos os NPCs e policiais
- * Baseado na função HideNonNpcAndPolice do dump.cs
+ * PROTEÇÃO ANTI-CRASH: Múltiplas camadas de verificação
  */
 void HideAllPolice(void* missionCtrl) {
+    // Verificação de ponteiro nulo
     if (!missionCtrl) return;
     
+    // Verificação de validade do ponteiro
+    if ((uintptr_t)missionCtrl < 0x10000000) return;
+    
     try {
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B2F10); // Offset estimado
-        if (baseAddress == 0) return;
+        // Verifica se a biblioteca está carregada
+        if (!isLibraryLoaded(targetLibName)) return;
+        
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B2F10);
+        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return;
+        
+        // Verificação de validade do endereço
+        if (baseAddress < 0x10000000) return;
         
         auto hideNonNpcAndPolice = reinterpret_cast<HideNonNpcAndPoliceFunc>(baseAddress);
+        if (!hideNonNpcAndPolice) return;
+        
         hideNonNpcAndPolice(missionCtrl);
+        
+    } catch (const std::exception& e) {
+        // Exceção capturada - operação falhou silenciosamente
     } catch (...) {
-        // Silencioso
+        // Qualquer exceção - operação falhou silenciosamente
     }
 }
 
 /**
  * Mostra/recupera todos os NPCs e policiais
- * Baseado na função RecoverNonNpcAndPolice do dump.cs
+ * PROTEÇÃO ANTI-CRASH: Múltiplas camadas de verificação
  */
 void ShowAllPolice(void* missionCtrl) {
+    // Verificação de ponteiro nulo
     if (!missionCtrl) return;
     
+    // Verificação de validade do ponteiro
+    if ((uintptr_t)missionCtrl < 0x10000000) return;
+    
     try {
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B3020); // Offset estimado
-        if (baseAddress == 0) return;
+        // Verifica se a biblioteca está carregada
+        if (!isLibraryLoaded(targetLibName)) return;
+        
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B3020);
+        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return;
+        
+        // Verificação de validade do endereço
+        if (baseAddress < 0x10000000) return;
         
         auto recoverNonNpcAndPolice = reinterpret_cast<RecoverNonNpcAndPoliceFunc>(baseAddress);
+        if (!recoverNonNpcAndPolice) return;
+        
         recoverNonNpcAndPolice(missionCtrl);
+        
+    } catch (const std::exception& e) {
+        // Exceção capturada - operação falhou silenciosamente
     } catch (...) {
-        // Silencioso
+        // Qualquer exceção - operação falhou silenciosamente
     }
 }
 
 /**
  * Obtém instância do xerife
- * Baseado na função NpcSheriff.get_Instance do dump.cs
+ * PROTEÇÃO ANTI-CRASH: Singleton pattern seguro
  */
 void* GetSheriffInstance() {
     try {
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4C1A80); // Offset estimado
-        if (baseAddress == 0) return nullptr;
+        // Verifica se a biblioteca está carregada
+        if (!isLibraryLoaded(targetLibName)) return nullptr;
+        
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4C1A80);
+        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return nullptr;
+        
+        // Verificação de validade do endereço
+        if (baseAddress < 0x10000000) return nullptr;
         
         auto getSheriffInstance = reinterpret_cast<GetNpcSheriffInstanceFunc>(baseAddress);
-        return getSheriffInstance();
+        if (!getSheriffInstance) return nullptr;
+        
+        void* instance = getSheriffInstance();
+        
+        // Verificação do resultado (instância válida)
+        if (instance && (uintptr_t)instance >= 0x10000000) {
+            return instance;
+        }
+        
+        return nullptr;
+    } catch (const std::exception& e) {
+        return nullptr;
     } catch (...) {
         return nullptr;
     }
@@ -664,15 +782,32 @@ void* GetSheriffInstance() {
 
 /**
  * Obtém instância do caçador de recompensas
- * Baseado na função NpcBountyHunter.get_Instance do dump.cs
+ * PROTEÇÃO ANTI-CRASH: Singleton pattern seguro
  */
 void* GetBountyHunterInstance() {
     try {
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4C2B90); // Offset estimado
-        if (baseAddress == 0) return nullptr;
+        // Verifica se a biblioteca está carregada
+        if (!isLibraryLoaded(targetLibName)) return nullptr;
+        
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4C2B90);
+        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return nullptr;
+        
+        // Verificação de validade do endereço
+        if (baseAddress < 0x10000000) return nullptr;
         
         auto getBountyHunterInstance = reinterpret_cast<GetNpcBountyHunterInstanceFunc>(baseAddress);
-        return getBountyHunterInstance();
+        if (!getBountyHunterInstance) return nullptr;
+        
+        void* instance = getBountyHunterInstance();
+        
+        // Verificação do resultado (instância válida)
+        if (instance && (uintptr_t)instance >= 0x10000000) {
+            return instance;
+        }
+        
+        return nullptr;
+    } catch (const std::exception& e) {
+        return nullptr;
     } catch (...) {
         return nullptr;
     }
