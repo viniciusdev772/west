@@ -40,11 +40,11 @@ enum DropGoodsType {
 // CORREÇÕES IMPLEMENTADAS V3.0:
 // ✅ SetPlayerOnHorse: Agora usa GetOnHorse.get_Instance() (0x4654C4) - MÉTODO SEGURO
 // ✅ SetPlayerOffHorse: Agora usa GetOffHorse.get_Instance() (0x465150) - MÉTODO SEGURO  
-// ✅ AimBot V4: SISTEMA INTELIGENTE com enums E OFFSETS reais do dump.cs
-// ✅ Proteção Anti-Cowboy: JAMAIS mira em Cowboy = 1 (jogador principal)
-// ✅ Sistema de Prioridades: Ogros(100) > Zumbis(80) > NPCs(60) > Animais(40)
-// ✅ Offsets Reais: PlayerBaseType baseType; // 0xC (AnimalType animalType; // 0x8)
-// ✅ Validação de Alvos: IsValidTarget() + GetTargetPriority() com offsets corretos
+// ✅ AimBot V5: SISTEMA AGRESSIVO com offsets E campos reais do dump.cs
+// ✅ Proteção Anti-Cowboy: JAMAIS mira em Cowboy = 1 (PlayerBaseType + AnimalType)
+// ✅ Busca Múltipla: AimTargetPlayer(0x24) + targetPlayer(0x30) + GetTargetPlayer()
+// ✅ Offsets Reais: aimTargetState(0x20), AimTargetPlayer(0x24), baseType(0xC), animalType(0x8)
+// ✅ Mira Agressiva: Força Aiming_Focus + atualiza campos diretos + dupla chamada
 // ✅ EnemyPosCtrl: Acesso real à lista de inimigos (0x2E66C4)
 // ✅ PlayerBaseType: Enum para distinguir Cowboy, EnemyNPC, Animal, Zombies, etc
 // ✅ Anti-Crash: Estados do jogo ao invés de funções diretas para cavalo
@@ -261,19 +261,40 @@ void* GetBountyHunterInstance();
 bool IsValidTarget(void* target, void* playerCtrl) {
     if (!target || target == playerCtrl) return false;
     
+    // Verificação de validade do ponteiro
+    if ((uintptr_t)target < 0x10000000) return false;
+    
     try {
-        // OFFSET REAL DO DUMP.CS: PlayerBaseType baseType; // 0xC
+        // TENTATIVA 1: PlayerBaseType baseType; // 0xC (PlayerBaseProperty)
         PlayerBaseType* baseTypePtr = (PlayerBaseType*)((char*)target + 0xC);
         PlayerBaseType baseType = *baseTypePtr;
         
         // ❌ NUNCA mira no Cowboy (jogador)
         if (baseType == Cowboy) return false;
         
-        // ✅ Alvos válidos por prioridade (baseado nos offsets reais)
-        return (baseType == Ogre ||         // PRIORIDADE MÁXIMA
-                baseType == Zombies ||      // PRIORIDADE ALTA  
-                baseType == EnemyNPC ||     // PRIORIDADE MÉDIA
-                baseType == Animal);        // PRIORIDADE BAIXA
+        // ✅ Verifica se é um tipo válido de inimigo
+        bool isValidEnemyType = (baseType == Ogre ||         // PRIORIDADE MÁXIMA
+                                baseType == Zombies ||      // PRIORIDADE ALTA  
+                                baseType == EnemyNPC ||     // PRIORIDADE MÉDIA
+                                baseType == Animal);        // PRIORIDADE BAIXA
+        
+        if (isValidEnemyType) {
+            // VERIFICAÇÃO ADICIONAL: AnimalType animalType; // 0x8 (se disponível)
+            AnimalType* animalTypePtr = (AnimalType*)((char*)target + 0x8);
+            AnimalType animalType = *animalTypePtr;
+            
+            // ❌ Nunca mira em tipos específicos de Cowboy
+            if (animalType == AnimalCowboy) return false;
+            
+            // ✅ Tipos de animais hostis válidos
+            if (animalType >= BountyHunter && animalType <= Eagle) {
+                return true;
+            }
+            
+            return isValidEnemyType; // Fallback para PlayerBaseType
+        }
+        
+        return false;
                 
     } catch (...) {
         return false; // Se houver erro, não é um alvo válido
@@ -308,23 +329,42 @@ int GetTargetPriority(void* target) {
 
 /**
  * Encontra o melhor alvo baseado em prioridade e proximidade
+ * SISTEMA APRIMORADO: Usa estruturas reais do dump.cs
  * @param playerCtrl Ponteiro para o controlador do jogador
  * @return Ponteiro para o melhor alvo ou nullptr
  */
 void* FindBestTarget(void* playerCtrl) {
     if (!playerCtrl) return nullptr;
     
-    // Por enquanto, usa o alvo atual do jogo se for válido
-    void* currentTarget = CallGetTargetPlayer(playerCtrl);
-    
-    // Verifica se o alvo atual é válido
-    if (IsValidTarget(currentTarget, playerCtrl)) {
-        return currentTarget;
+    try {
+        // OFFSET REAL: Transform AimTargetPlayer; // 0x24 (do dump.cs)
+        void** aimTargetPlayerPtr = (void**)((char*)playerCtrl + 0x24);
+        void* currentAimTarget = *aimTargetPlayerPtr;
+        
+        // Se já há um alvo de mira válido
+        if (currentAimTarget && IsValidTarget(currentAimTarget, playerCtrl)) {
+            return currentAimTarget;
+        }
+        
+        // ALTERNATIVA: Usar campo targetPlayer; // 0x30 se disponível
+        void** targetPlayerPtr = (void**)((char*)playerCtrl + 0x30);
+        void* targetPlayer = *targetPlayerPtr;
+        
+        if (targetPlayer && IsValidTarget(targetPlayer, playerCtrl)) {
+            return targetPlayer;
+        }
+        
+        // Se não há alvo válido nos campos diretos, usa a função
+        void* functionTarget = CallGetTargetPlayer(playerCtrl);
+        if (IsValidTarget(functionTarget, playerCtrl)) {
+            return functionTarget;
+        }
+        
+        return nullptr;
+        
+    } catch (...) {
+        return nullptr;
     }
-    
-    // Se não há alvo válido, retorna nullptr
-    // O jogo continuará buscando naturalmente
-    return nullptr;
 }
 
 /**
@@ -1143,7 +1183,7 @@ float hook_GetReloadTime(void* thisPtr) {
 
 /**
  * Hook para a função UpdateAimTarget
- * Implementa aimbot inteligente com sistema de prioridades
+ * SISTEMA AIMBOT V5: Busca agressiva com offsets reais do dump.cs
  */
 void hook_UpdateAimTarget(void* thisPtr) {
     if (!thisPtr) return;
@@ -1156,38 +1196,52 @@ void hook_UpdateAimTarget(void* thisPtr) {
         CallSetAimState(thisPtr, Aiming_Focus, nullptr, true);
     }
     
-    // ⚡ AIMBOT INTELIGENTE COM PROTEÇÃO ANTI-COWBOY
+    // ⚡ AIMBOT V5: BUSCA AGRESSIVA COM PROTEÇÃO ANTI-COWBOY
     if (aimBot) {
-        // Busca o melhor alvo disponível
+        static int framesToUpdate = 0;
+        framesToUpdate++;
+        
+        // Busca o melhor alvo disponível usando múltiplas estratégias
         void* bestTarget = FindBestTarget(thisPtr);
         
         if (bestTarget) {
-            // ✅ Alvo válido encontrado - aplicar mira inteligente
+            // ✅ ALVO VÁLIDO ENCONTRADO - APLICAR MIRA AGRESSIVA
             int priority = GetTargetPriority(bestTarget);
             
-            // Define intensidade da mira baseada na prioridade
-            AimTargetState aimState = (priority >= 80) ? Aiming_Focus : Aiming_NotFocus;
+            // FORÇA MIRA FOCADA para todos os alvos válidos
+            CallSetAimState(thisPtr, Aiming_Focus, bestTarget, true);
             
-            // Força mira no alvo válido
-            CallSetAimState(thisPtr, aimState, bestTarget, true);
-            CallSetTargetPlayer(thisPtr, bestTarget);
-            
-            // Contador de alvos por tipo (silencioso)
-            static int ogres = 0, zombies = 0, npcs = 0, animals = 0;
-            switch (priority) {
-                case 100: ogres++; break;    // Ogros
-                case 80:  zombies++; break;  // Zumbis  
-                case 60:  npcs++; break;     // NPCs
-                case 40:  animals++; break;  // Animais
+            // ATUALIZA CAMPOS DIRETOS da estrutura MyCtrlPlayer
+            try {
+                // OFFSET REAL: Transform AimTargetPlayer; // 0x24
+                void** aimTargetPtr = (void**)((char*)thisPtr + 0x24);
+                *aimTargetPtr = bestTarget;
+                
+                // OFFSET REAL: MyCtrlPlayer.AimTargetState aimTargetState; // 0x20
+                AimTargetState* aimStatePtr = (AimTargetState*)((char*)thisPtr + 0x20);
+                *aimStatePtr = Aiming_Focus;
+                
+                // FORÇA CHAMADA DE SetTargetPlayer
+                CallSetTargetPlayer(thisPtr, bestTarget);
+                
+            } catch (...) {
+                // Fallback silencioso
             }
             
         } else {
-            // ❌ Nenhum alvo válido - acelera busca
-            static int searchBoost = 0;
-            if (searchBoost++ < 2) {
+            // ❌ NENHUM ALVO VÁLIDO - BUSCA AGRESSIVA
+            if (framesToUpdate % 5 == 0) { // A cada 5 frames
+                // Força múltiplas chamadas da função original para acelerar busca
                 original_UpdateAimTarget(thisPtr);
-            } else {
-                searchBoost = 0;
+                original_UpdateAimTarget(thisPtr); // Dupla chamada para forçar
+                
+                // Tenta forçar atualizações no campo AimTargetState
+                try {
+                    AimTargetState* aimStatePtr = (AimTargetState*)((char*)thisPtr + 0x20);
+                    *aimStatePtr = Nobody; // Reset para forçar nova busca
+                } catch (...) {
+                    // Silencioso
+                }
             }
         }
     }
