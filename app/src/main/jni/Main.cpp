@@ -176,7 +176,7 @@ enum AnimalType {
     Zombies07 = 40,       // ✅ Zumbi tipo 7
     
     // Ogros/Chefes - PRIORIDADE MÁXIMA
-    Ogre = 41,            // ✅ Ogro comum
+    AnimalOgre = 41,      // ✅ Ogro comum (renomeado para evitar conflito)
     OgreBoss = 42,        // ✅ Chefe Ogro
     
     // Animais Hostis - PRIORIDADE BAIXA
@@ -195,6 +195,11 @@ typedef void* (*GetTargetPlayerFunc)(void* thisPtr);
 typedef int (*GetClosestCharacterFunc)(void* verts, Vector3 pos);
 typedef PlayerBaseType (*GetPlayerBaseTypeFunc)(void* thisPtr);
 typedef AnimalType (*GetAnimalTypeFunc)(void* thisPtr);
+
+// Declarações antecipadas das funções necessárias
+void* CallGetTargetPlayer(void* playerCtrl);
+void CallSetAimState(void* playerCtrl, AimTargetState state, void* target, bool forceTarget);
+void CallSetTargetPlayer(void* playerCtrl, void* target);
 
 /**
  * Verifica se um alvo é válido para o aimbot
@@ -414,15 +419,11 @@ void CallUpdateAimTarget(void* playerCtrl) {
  * @param forceTarget Forçar alvo
  */
 void CallSetAimState(void* playerCtrl, AimTargetState state, void* target, bool forceTarget) {
-    if (!playerCtrl) {
-        __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Erro: Ponteiro do jogador é nulo");
-        return;
-    }
+    if (!playerCtrl) return;
     
     uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4599AC);
     auto setAimState = reinterpret_cast<SetAimStateFunc>(baseAddress);
     setAimState(playerCtrl, state, target, forceTarget);
-    __android_log_print(ANDROID_LOG_INFO, "ModMenu", "Estado de mira alterado para: %d", state);
 }
 
 /**
@@ -431,23 +432,16 @@ void CallSetAimState(void* playerCtrl, AimTargetState state, void* target, bool 
  * @param target Ponteiro para o jogador alvo
  */
 void CallSetTargetPlayer(void* playerCtrl, void* target) {
-    if (!playerCtrl) {
-        __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Erro: Ponteiro do jogador é nulo");
-        return;
-    }
+    if (!playerCtrl) return;
     
     try {
         uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x478E1C);
-        if (baseAddress == 0) {
-            __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Erro: Endereço inválido para SetTargetPlayer");
-            return;
-        }
+        if (baseAddress == 0) return;
         
         auto setTargetPlayer = reinterpret_cast<SetTargetPlayerFunc>(baseAddress);
         setTargetPlayer(playerCtrl, target);
-        __android_log_print(ANDROID_LOG_INFO, "ModMenu", "Alvo do jogador definido: %p", target);
     } catch (...) {
-        __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Exceção em SetTargetPlayer");
+        // Silencioso
     }
 }
 
@@ -457,24 +451,15 @@ void CallSetTargetPlayer(void* playerCtrl, void* target) {
  * @return Ponteiro para o jogador alvo ou nullptr
  */
 void* CallGetTargetPlayer(void* playerCtrl) {
-    if (!playerCtrl) {
-        __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Erro: Ponteiro do jogador é nulo");
-        return nullptr;
-    }
+    if (!playerCtrl) return nullptr;
     
     try {
         uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x480DE4);
-        if (baseAddress == 0) {
-            __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Erro: Endereço inválido para GetTargetPlayer");
-            return nullptr;
-        }
+        if (baseAddress == 0) return nullptr;
         
         auto getTargetPlayer = reinterpret_cast<GetTargetPlayerFunc>(baseAddress);
-        void* target = getTargetPlayer(playerCtrl);
-        __android_log_print(ANDROID_LOG_DEBUG, "ModMenu", "Alvo atual: %p", target);
-        return target;
+        return getTargetPlayer(playerCtrl);
     } catch (...) {
-        __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Exceção em GetTargetPlayer");
         return nullptr;
     }
 }
