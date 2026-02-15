@@ -2,6 +2,7 @@ apply plugin: 'com.android.application'
 
 android {
     compileSdkVersion 34
+    ndkVersion "27.0.12077973"
     defaultConfig {
         applicationId "vdev.com.android.support"
         minSdkVersion 21

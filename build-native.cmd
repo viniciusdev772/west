@@ -28,7 +28,7 @@ if not exist "gradle\wrapper\gradle-wrapper.jar" (
         where gradle >nul 2>&1
         if !ERRORLEVEL! equ 0 (
             echo Usando Gradle global para recriar o wrapper...
-            gradle wrapper --gradle-version=8.6
+            gradle wrapper --gradle-version=8.13
         ) else (
             echo ERRO: Gradle nao encontrado globalmente
             echo Crie o arquivo fix-gradle-wrapper.cmd ou instale o Gradle
@@ -36,6 +36,60 @@ if not exist "gradle\wrapper\gradle-wrapper.jar" (
             exit /b 1
         )
     )
+)
+
+:: Validar se gradle-wrapper.jar contem GradleWrapperMain
+set "WRAPPER_OK=0"
+if exist "gradle\wrapper\gradle-wrapper.jar" (
+    powershell -Command "& { Add-Type -AssemblyName System.IO.Compression.FileSystem; try { $zip = [System.IO.Compression.ZipFile]::OpenRead('gradle\wrapper\gradle-wrapper.jar'); $ok = $zip.Entries.FullName -contains 'org/gradle/wrapper/GradleWrapperMain.class'; $zip.Dispose(); if ($ok) { exit 0 } else { exit 1 } } catch { exit 1 } }"
+    if !ERRORLEVEL! equ 0 set "WRAPPER_OK=1"
+)
+
+if "!WRAPPER_OK!"=="0" (
+    echo AVISO: Gradle wrapper invalido ou corrompido
+    if exist "fix-gradle-wrapper.cmd" (
+        echo Executando corretor do wrapper...
+        call fix-gradle-wrapper.cmd
+    ) else (
+        echo ERRO: fix-gradle-wrapper.cmd nao encontrado para reparo automatico
+        pause
+        exit /b 1
+    )
+)
+
+:: Verificar Java/JDK
+if "%JAVA_HOME%"=="" (
+    echo AVISO: JAVA_HOME nao esta definido
+    echo Tentando localizar Java automaticamente...
+
+    set "JAVA_CANDIDATE=%ProgramFiles%\Android\Android Studio\jbr"
+    if exist "!JAVA_CANDIDATE!\bin\java.exe" set "JAVA_HOME=!JAVA_CANDIDATE!"
+
+    if "%JAVA_HOME%"=="" (
+        set "JAVA_CANDIDATE=%ProgramFiles%\Android\Android Studio\jre"
+        if exist "!JAVA_CANDIDATE!\bin\java.exe" set "JAVA_HOME=!JAVA_CANDIDATE!"
+    )
+
+    if "%JAVA_HOME%"=="" (
+        set "JAVA_CANDIDATE=%LOCALAPPDATA%\Programs\Android Studio\jbr"
+        if exist "!JAVA_CANDIDATE!\bin\java.exe" set "JAVA_HOME=!JAVA_CANDIDATE!"
+    )
+
+    if not "%JAVA_HOME%"=="" (
+        echo JAVA_HOME encontrado automaticamente: !JAVA_HOME!
+    )
+)
+
+if "%JAVA_HOME%"=="" (
+    where java >nul 2>&1
+    if !ERRORLEVEL! neq 0 (
+        echo ERRO: Java nao encontrado
+        echo Instale o JDK 17+ ou configure JAVA_HOME corretamente
+        pause
+        exit /b 1
+    )
+) else (
+    set "PATH=%JAVA_HOME%\bin;%PATH%"
 )
 
 :: Verificar se o Android SDK esta configurado
@@ -56,51 +110,31 @@ if "%ANDROID_HOME%"=="" (
     )
 )
 
-:: Encontrar versao do NDK instalada
-set "NDK_PATH="
-for /d %%i in ("%ANDROID_HOME%\ndk\*") do (
-    set "NDK_PATH=%%i"
-    goto :found_ndk
-)
-:found_ndk
-
-if "%NDK_PATH%"=="" (
-    echo ERRO: Nenhuma versao do Android NDK encontrada em %ANDROID_HOME%\ndk\
-    echo Por favor, instale o Android NDK atraves do SDK Manager
-    pause
-    exit /b 1
-)
-
-echo NDK encontrado: %NDK_PATH%
-
-:: Definir variaveis de ambiente necessarias
-set "ANDROID_NDK_HOME=%NDK_PATH%"
-
 echo Configuracoes:
 echo - ANDROID_HOME: %ANDROID_HOME%
-echo - ANDROID_NDK_HOME: %ANDROID_NDK_HOME%
+if not "%JAVA_HOME%"=="" echo - JAVA_HOME: %JAVA_HOME%
+echo - NDK: controlado por ndkVersion no app/build.gradle
 echo.
 
 :: Criar arquivo local.properties se nao existir
 if not exist "local.properties" (
     echo Criando local.properties...
     echo sdk.dir=%ANDROID_HOME:\=/% > local.properties
-    echo ndk.dir=%ANDROID_NDK_HOME:\=/% >> local.properties
 )
 
 echo Iniciando build da biblioteca nativa...
 echo.
 
-:: Executar o build
-echo Executando: gradlew.bat :app:assembleDebug
-call gradlew.bat :app:assembleDebug
+:: Executar build nativo direto (.so)
+echo Executando: gradlew.bat :app:externalNativeBuildDebug
+call gradlew.bat :app:externalNativeBuildDebug
 
 if %ERRORLEVEL% neq 0 (
     echo.
     echo ERRO: Build falhou com codigo %ERRORLEVEL%
     echo.
     echo Tentativas de solucao:
-    echo 1. Verifique se o Android SDK e NDK estao instalados corretamente
+    echo 1. Verifique se Java JDK 17+ esta instalado e JAVA_HOME configurado
     echo 2. Verifique se todas as dependencias estao satisfeitas
     echo 3. Execute: gradlew.bat clean :app:assembleDebug
     pause
@@ -113,15 +147,22 @@ echo  Build concluido com sucesso!
 echo ============================================
 echo.
 
-:: Procurar pelos arquivos .so gerados
-echo Procurando bibliotecas compiladas...
-for /r "app\build" %%f in (*.so) do (
-    echo Encontrado: %%f
+:: Mostrar apenas o .so mais recente
+echo Procurando biblioteca compilada mais recente...
+set "LATEST_SO="
+for /f "delims=" %%f in ('dir /s /b /a-d /o-d "app\build\*.so" 2^>nul') do (
+    if not defined LATEST_SO set "LATEST_SO=%%f"
+)
+
+if defined LATEST_SO (
+    echo Mais recente: %LATEST_SO%
+) else (
+    echo Nenhuma biblioteca .so encontrada no diretorio app\build
 )
 
 echo.
 echo A biblioteca nativa foi compilada com sucesso!
-echo Arquivos .so estao localizados em: app\build\intermediates\ndkBuild\debug\obj\local\armeabi-v7a\
+if defined LATEST_SO echo Biblioteca .so mais recente: %LATEST_SO%
 echo.
 
 pause
