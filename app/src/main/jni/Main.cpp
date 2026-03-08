@@ -2,7 +2,10 @@
 #include <jni.h>
 #include <unistd.h>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <android/log.h>
+#include <dlfcn.h>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.h"
@@ -75,6 +78,8 @@ bool alwaysHeadshot = false;         // 💀 Força todos os tiros como headshot
 bool flyMode = false;                // 🕊️ Modo voo experimental
 bool completeEsp = false;            // 👁️ ESP completo com barras de vida
 bool autoKill = false;               // ☠️ Mata inimigos ativos com BeHit
+bool bulletTailEsp = false;          // 🔫 Desenha trilhas de tiro em NPCs armados
+bool minimapEnemyEsp = false;        // 🗺️ ESP de inimigos no minimapa
 int sliderValue = 1, Moedas = 0, Gems = 0;
 float speedMultiplier = 1.0f;
 float flyVerticalSpeed = 5.0f;
@@ -89,6 +94,13 @@ volatile bool pendingDestroyMissionHints = false;
 volatile bool pendingEspRefresh = false;
 volatile bool pendingEspClear = false;
 volatile bool pendingAutoKillBurst = false;
+volatile bool pendingBulletTailShot = false;
+volatile bool pendingBulletTailClear = false;
+volatile bool pendingMiniMapEspRefresh = false;
+volatile bool pendingMiniMapEspClear = false;
+volatile bool pendingShowWordsTest = false;
+volatile bool pendingShowWordsCustom = false;
+char pendingCustomWordsText[256] = {0};
 
 // Estrutura para dados do jogador em tempo real
 struct MyPlayerRealtimeData {
@@ -323,6 +335,7 @@ typedef void (*HideAimFollowTargetUIFunc)(void* thisPtr, void* method);
 typedef void (*SetAimFollowTargetUIFunc)(void* thisPtr, void* target, void* method);
 typedef void* (*GetEntityManagerInstanceFunc)(void* method);
 typedef void* (*GameCtrlGetEnemyActiveListFunc)(void* thisPtr, void* method);
+typedef void* (*GameCtrlGetHeadLookTargetFunc)(void* thisPtr, void* me, void* method);
 typedef void (*GenerateEnemyBloodFunc)(void* thisPtr, void* target, void* method);
 typedef void (*DestroyAllBloodFunc)(void* thisPtr, void* method);
 typedef void (*SetCurrentBloodValueFunc)(void* thisPtr, void* target, int blood, int maxBlood, void* method);
@@ -335,6 +348,18 @@ typedef void (*MissionEntityDeleteEnemyFunc)(void* thisPtr, void* playerBase, vo
 typedef bool (*EnemyFactoryContainPlayerBaseFunc)(void* thisPtr, void* playerBase, void* method);
 typedef void (*EnemyFactoryDeletePlayerBaseFunc)(void* thisPtr, void* playerBase, void* method);
 typedef void (*EnemyGCFunc)(void* thisPtr, void* player, void* method);
+typedef void* (*GetBulletTailFactoryInstanceFunc)(void* method);
+typedef void (*GenerateEnemyBulletTailFunc)(void* thisPtr, Vector3 startPos, void* player, bool isHit, void* method);
+typedef void (*DestroyAllBulletTailFunc)(void* thisPtr, void* method);
+typedef void (*GenerateMiniMapHintsFunc)(void* thisPtr, void* param, void* method);
+typedef void (*DestroyMiniMapHintByTargetFunc)(void* thisPtr, int type, void* target, bool isClearAll, void* method);
+typedef void (*DestroyAllMiniMapHintsFunc)(void* thisPtr, void* method);
+typedef void* (*MiniMapHintsCtorByTargetFunc)(void* thisPtr, int hintType, void* target, void* method);
+typedef void (*PlayWordsHintsWithTimeFunc)(void* thisPtr, void* str, float showTime, void* method);
+typedef void* (*Il2CppStringNewFunc)(const char* str);
+typedef int (*MissionCtrlGetStateFunc)(void* thisPtr, void* method);
+typedef void* (*ComponentGetGameObjectFunc)(void* thisPtr, void* method);
+typedef bool (*PropertyAddCanAttackLayerFunc)(void* thisPtr, void* targetGameObject, void* method);
 
 // Declarações antecipadas das funções necessárias
 void CallSetAimState(void* playerCtrl, AimTargetState state, void* target, bool forceTarget);
@@ -368,6 +393,26 @@ bool CanRunAutoKill();
 int CollectActiveEnemyBases(void** outEnemies, int maxEnemies);
 void RunAutoKillOnce();
 void ProcessGameplayFrame(void* myCtrlPlayer);
+void* GetBulletTailFactoryInstance();
+static bool IsProbablyValidPtr(void* ptr);
+static bool ResolvePlayerStartPos(void* myPlayer, Vector3& outStartPos);
+static bool IsBulletTailCompatibleEnemyBase(void* enemyBase, void** outPlayer);
+bool GenerateBulletTailForPlayer(void* factory, const Vector3& startPos, void* targetPlayer, bool isHit);
+int GenerateBulletTailForAllActiveEnemies();
+bool CanUseBulletTail();
+void TriggerBulletTailNow();
+void ClearBulletTailNow();
+void* GetMiniMapIconCtrlInstance();
+bool CanUseMiniMapEnemyEsp();
+void RefreshMiniMapEnemyEsp();
+void ClearMiniMapEnemyEsp();
+void ShowWordsHintText(const char* text, float showTime);
+void ProcessGameplayHints();
+void* ResolveBestAggressiveAimTarget(void* myCtrlPlayer);
+void* GetGameCtrlInstance();
+void* GetMyPlayerInstance();
+bool GetPlayerWorldPosition(void* player, Vector3& outPos);
+static bool CanAttackTargetTransform(void* myCtrlPlayer, void* targetTransform);
 
 bool IsValidAimTransform(void* target, void* playerCtrl) {
     if (!target || target == playerCtrl) return false;
@@ -466,6 +511,211 @@ void CallSaveCurrentPlayerPosition(Vector3 position) {
     savePosition(position);
     __android_log_print(ANDROID_LOG_INFO, "ModMenu", "Posição do jogador salva: (%.2f, %.2f, %.2f)", 
                         position.x, position.y, position.z);
+}
+
+static void* GetPreferredAimTransformFromPlayer(void* player) {
+    if (!IsProbablyValidPtr(player)) return nullptr;
+
+    try {
+        void* head = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x3C); // Player.Head
+        if (IsProbablyValidPtr(head)) return head;
+
+        void* neck = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x38); // Player.Neck
+        if (IsProbablyValidPtr(neck)) return neck;
+
+        void* body = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x28); // Player.Body
+        if (IsProbablyValidPtr(body)) return body;
+
+        void* root = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x24); // Player.Root
+        if (IsProbablyValidPtr(root)) return root;
+    } catch (...) {
+    }
+
+    return nullptr;
+}
+
+bool GetPlayerWorldPosition(void* player, Vector3& outPos) {
+    if (!IsProbablyValidPtr(player)) return false;
+
+    try {
+        uintptr_t addrPlayerGetPosition = getAbsoluteAddress(targetLibName, 0x341378); // Player.GetPosition()
+        if (addrPlayerGetPosition == 0) return false;
+        auto getPlayerPosition = reinterpret_cast<PlayerGetPositionFunc>(addrPlayerGetPosition);
+        outPos = getPlayerPosition(player, nullptr);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool CanAttackTargetTransform(void* myCtrlPlayer, void* targetTransform) {
+    if (!IsProbablyValidPtr(myCtrlPlayer) || !IsProbablyValidPtr(targetTransform)) return false;
+
+    try {
+        void* myCtrlPlayerData = *reinterpret_cast<void**>(reinterpret_cast<char*>(myCtrlPlayer) + 0x14); // MyCtrlPlayer.m_dMyCtrlPlayerData
+        if (!IsProbablyValidPtr(myCtrlPlayerData)) return false;
+
+        void* propertyAdd = *reinterpret_cast<void**>(reinterpret_cast<char*>(myCtrlPlayerData) + 0x8); // MyCtrlPlayerData.m_dPropertyAdd
+        if (!IsProbablyValidPtr(propertyAdd)) return false;
+
+        uintptr_t addrGetGameObject = getAbsoluteAddress(targetLibName, 0x846AE0); // Component.get_gameObject()
+        uintptr_t addrPlayerCanAttackLayer = getAbsoluteAddress(targetLibName, 0x457DFC); // PropertyAdd.PlayerCanAttackLayer(GameObject)
+        if (addrGetGameObject == 0 || addrPlayerCanAttackLayer == 0) return false;
+
+        auto componentGetGameObject = reinterpret_cast<ComponentGetGameObjectFunc>(addrGetGameObject);
+        auto playerCanAttackLayer = reinterpret_cast<PropertyAddCanAttackLayerFunc>(addrPlayerCanAttackLayer);
+
+        void* targetGameObject = componentGetGameObject(targetTransform, nullptr);
+        if (!IsProbablyValidPtr(targetGameObject)) return false;
+
+        return playerCanAttackLayer(propertyAdd, targetGameObject, nullptr);
+    } catch (...) {
+        return false;
+    }
+}
+
+static int GetAggressivePriorityScore(int baseType, int animalType, int gunID) {
+    switch (baseType) {
+        case Ogre:
+            return 1000 + ((animalType == OgreBoss) ? 200 : 0);
+        case Zombies:
+            return 800;
+        case EnemyNPC:
+            return 600 + ((gunID > 0) ? 120 : 0);
+        case Animal:
+            if (animalType == Bear || animalType == Wolf01 || animalType == Wolf02 || animalType == Wolf03 || animalType == Cheetah) {
+                return 350;
+            }
+            return 150;
+        case MissionPerson:
+            return 120;
+        case NonPermanentNpc:
+            return 80;
+        default:
+            return -1;
+    }
+}
+
+static bool IsSameCombatTarget(void* lhsPlayer, void* rhsPlayer) {
+    return IsProbablyValidPtr(lhsPlayer) && IsProbablyValidPtr(rhsPlayer) && lhsPlayer == rhsPlayer;
+}
+
+static bool ResolveCombatData(void* enemyBase, void** outPlayer, int& outBaseType, int& outAnimalType, int& outGunID, Vector3& outPos) {
+    if (outPlayer) *outPlayer = nullptr;
+    outBaseType = -1;
+    outAnimalType = -1;
+    outGunID = 0;
+    if (!IsProbablyValidPtr(enemyBase)) return false;
+
+    try {
+        void* player = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0xC); // PlayerBase.m_dPlayer
+        void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0x14); // PlayerBase.m_dPlayerBaseData
+        if (!IsProbablyValidPtr(player) || !IsProbablyValidPtr(baseData)) return false;
+
+        void* property = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0x8); // PlayerBaseData.m_dProperty
+        if (!IsProbablyValidPtr(property)) return false;
+
+        outBaseType = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0xC);     // PlayerBaseProperty.baseType
+        int maxBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x10);    // PlayerBaseProperty.m_dMaxBlood
+        int currentBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x14);// PlayerBaseProperty.m_dCurrentBlood
+        if (currentBlood <= 0 || maxBlood <= 0) return false;
+
+        void* aiData = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0xC); // PlayerBaseData.m_dAIdata
+        if (IsProbablyValidPtr(aiData)) {
+            outAnimalType = *reinterpret_cast<int*>(reinterpret_cast<char*>(aiData) + 0x8); // AIdata.animalType
+            outGunID = *reinterpret_cast<int*>(reinterpret_cast<char*>(aiData) + 0x10);      // AIdata.gunID
+        }
+
+        if (!GetPlayerWorldPosition(player, outPos)) return false;
+        if (outPlayer) *outPlayer = player;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+void* ResolveBestAggressiveAimTarget(void* myCtrlPlayer) {
+    if (!IsProbablyValidPtr(myCtrlPlayer)) return nullptr;
+
+    void* bestTarget = FindBestTarget(myCtrlPlayer);
+    if (IsProbablyValidPtr(bestTarget) && CanAttackTargetTransform(myCtrlPlayer, bestTarget)) return bestTarget;
+
+    try {
+        void* myPlayer = GetMyPlayerInstance();
+        if (!IsProbablyValidPtr(myPlayer)) return nullptr;
+
+        static void* lockedTargetPlayer = nullptr;
+        static int lockedFramesLeft = 0;
+        Vector3 myPos = {0.0f, 0.0f, 0.0f};
+        if (!GetPlayerWorldPosition(myPlayer, myPos)) return nullptr;
+
+        if (IsProbablyValidPtr(lockedTargetPlayer) && lockedFramesLeft > 0) {
+            void* lockedTransform = GetPreferredAimTransformFromPlayer(lockedTargetPlayer);
+            if (IsProbablyValidPtr(lockedTransform) && CanAttackTargetTransform(myCtrlPlayer, lockedTransform)) {
+                lockedFramesLeft--;
+                return lockedTransform;
+            }
+        }
+
+        void* enemies[128] = {};
+        int enemyCount = CollectActiveEnemyBases(enemies, 128);
+        if (enemyCount <= 0) return nullptr;
+
+        void* bestPlayer = nullptr;
+        void* bestTransform = nullptr;
+        int bestScore = -100000;
+        float bestDistanceSq = 1.0e30f;
+
+        for (int i = 0; i < enemyCount; ++i) {
+            void* enemyPlayer = nullptr;
+            int baseType = -1;
+            int animalType = -1;
+            int gunID = 0;
+            Vector3 enemyPos = {0.0f, 0.0f, 0.0f};
+            if (!ResolveCombatData(enemies[i], &enemyPlayer, baseType, animalType, gunID, enemyPos)) continue;
+            if (!IsProbablyValidPtr(enemyPlayer) || enemyPlayer == myPlayer) continue;
+
+            void* targetTransform = GetPreferredAimTransformFromPlayer(enemyPlayer);
+            if (!IsProbablyValidPtr(targetTransform)) continue;
+            if (!CanAttackTargetTransform(myCtrlPlayer, targetTransform)) continue;
+
+            int score = GetAggressivePriorityScore(baseType, animalType, gunID);
+            if (score < 0) continue;
+
+            float dx = enemyPos.x - myPos.x;
+            float dy = enemyPos.y - myPos.y;
+            float dz = enemyPos.z - myPos.z;
+            float distanceSq = dx * dx + dy * dy + dz * dz;
+
+            if (score > bestScore || (score == bestScore && distanceSq < bestDistanceSq)) {
+                bestScore = score;
+                bestDistanceSq = distanceSq;
+                bestPlayer = enemyPlayer;
+                bestTransform = targetTransform;
+            }
+        }
+
+        if (IsProbablyValidPtr(bestPlayer) && IsProbablyValidPtr(bestTransform)) {
+            if (!IsSameCombatTarget(lockedTargetPlayer, bestPlayer)) {
+                lockedTargetPlayer = bestPlayer;
+                lockedFramesLeft = 18;
+            }
+            return bestTransform;
+        }
+
+        void* gameCtrl = GetGameCtrlInstance();
+        if (!IsProbablyValidPtr(gameCtrl)) return nullptr;
+        uintptr_t addrGetHeadLookTarget = getAbsoluteAddress(targetLibName, 0x2F19FC); // GameCtrl.GetHeadLookTarget(Player me)
+        if (addrGetHeadLookTarget == 0) return nullptr;
+        auto getHeadLookTarget = reinterpret_cast<GameCtrlGetHeadLookTargetFunc>(addrGetHeadLookTarget);
+        void* targetPlayer = getHeadLookTarget(gameCtrl, myPlayer, nullptr);
+        if (!IsProbablyValidPtr(targetPlayer) || targetPlayer == myPlayer) return nullptr;
+        void* fallbackTransform = GetPreferredAimTransformFromPlayer(targetPlayer);
+        if (!IsProbablyValidPtr(fallbackTransform)) return nullptr;
+        return CanAttackTargetTransform(myCtrlPlayer, fallbackTransform) ? fallbackTransform : nullptr;
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 void ForceAimRefresh(void* playerCtrl) {
@@ -1345,23 +1595,34 @@ void hook_UpdateAimTarget(void* thisPtr) {
     
     if (!autoAim && !aimBot && !aimBotAggressive) return;
 
-    // Usa somente campos reais do MyCtrlPlayer (0x24/0x28).
+    // Primeiro tenta o alvo já resolvido pelo jogo.
     void* bestTarget = FindBestTarget(thisPtr);
+    if (IsProbablyValidPtr(bestTarget) && !CanAttackTargetTransform(thisPtr, bestTarget)) {
+        bestTarget = nullptr;
+    }
 
-    // Modo agressivo: força novos ciclos de aquisição quando ainda não há alvo.
-    if (!bestTarget && aimBotAggressive) {
+    // Modo agressivo: mantém o fluxo antigo que funcionava e adiciona fallback nativo.
+    if (aimBotAggressive) {
         static int aggressiveFrameCounter = 0;
         aggressiveFrameCounter++;
 
-        if ((aggressiveFrameCounter % 2) == 0) {
+        if (!bestTarget || (aggressiveFrameCounter % 2) == 0) {
             ForceAimRefresh(thisPtr);
             original_UpdateAimTarget(thisPtr);
             original_UpdateAimTarget(thisPtr);
             bestTarget = FindBestTarget(thisPtr);
+            if (IsProbablyValidPtr(bestTarget) && !CanAttackTargetTransform(thisPtr, bestTarget)) {
+                bestTarget = nullptr;
+            }
+        }
+
+        if (!bestTarget) {
+            bestTarget = ResolveBestAggressiveAimTarget(thisPtr);
         }
     }
 
     if (!bestTarget) return;
+    if (!CanAttackTargetTransform(thisPtr, bestTarget)) return;
 
     CallSetAimState(thisPtr, Aiming_Focus, bestTarget, true);
 
@@ -1412,6 +1673,38 @@ void hook_SetAimState(void* thisPtr, AimTargetState state, void* target, bool fo
 void ProcessGameplayFrame(void* myCtrlPlayer) {
     if (!myCtrlPlayer) return;
 
+    if (pendingBulletTailClear) {
+        ClearBulletTailNow();
+        pendingBulletTailClear = false;
+    }
+
+    if (pendingBulletTailShot) {
+        TriggerBulletTailNow();
+        pendingBulletTailShot = false;
+    }
+
+    if (pendingMiniMapEspClear) {
+        ClearMiniMapEnemyEsp();
+        pendingMiniMapEspClear = false;
+    }
+
+    if (pendingMiniMapEspRefresh) {
+        RefreshMiniMapEnemyEsp();
+        pendingMiniMapEspRefresh = false;
+    }
+
+    if (pendingShowWordsTest) {
+        ShowWordsHintText("Teste de texto custom via UI_WordsHints", 3.5f);
+        pendingShowWordsTest = false;
+    }
+
+    if (pendingShowWordsCustom) {
+        ShowWordsHintText(pendingCustomWordsText, 4.5f);
+        pendingShowWordsCustom = false;
+    }
+
+    ProcessGameplayHints();
+
     if (pendingEspClear) {
         ClearCompleteESP();
         pendingEspClear = false;
@@ -1432,6 +1725,18 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
         espFrameCounter++;
         if ((espFrameCounter % 45) == 0) {
             RefreshCompleteESP();
+        }
+    }
+
+    if (bulletTailEsp && CanUseBulletTail()) {
+        GenerateBulletTailForAllActiveEnemies();
+    }
+
+    if (minimapEnemyEsp && CanUseMiniMapEnemyEsp()) {
+        static int miniMapEspFrameCounter = 0;
+        miniMapEspFrameCounter++;
+        if ((miniMapEspFrameCounter % 30) == 0) {
+            RefreshMiniMapEnemyEsp();
         }
     }
 
@@ -1627,6 +1932,11 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("42_Button_Obter Todas as Entidades (08/03/2026)"),
             OBFUSCATE("43_Toggle_Auto Kill Seguro (08/03/2026)"),
             OBFUSCATE("44_Button_Kill All Agora (08/03/2026)"),
+            OBFUSCATE("45_Toggle_Trilhas de Tiro em Todos os Alvos (08/03/2026)"),
+            OBFUSCATE("46_Button_Limpar Trilhas de Tiro (08/03/2026)"),
+            OBFUSCATE("47_Toggle_ESP Inimigos no Minimapa (08/03/2026)"),
+            OBFUSCATE("48_Button_Mostrar Texto de Teste (08/03/2026)"),
+            OBFUSCATE("49_InputText_Mostrar Texto Custom (08/03/2026)"),
     };
 
     int Total_Feature = (sizeof features / sizeof features[0]);
@@ -1967,6 +2277,68 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
                 __android_log_print(ANDROID_LOG_INFO, "MOD_AUTOKILL", "Kill All agendado");
             } else {
                 __android_log_print(ANDROID_LOG_WARN, "MOD_AUTOKILL", "Kill All bloqueado: contexto de jogo invalido");
+            }
+            break;
+        case 45: // Trilhas de Tiro em Todos os Alvos
+            if (boolean) {
+                if (CanUseBulletTail()) {
+                    bulletTailEsp = true;
+                    pendingBulletTailShot = true;
+                    __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "Trilhas de tiro por frame ativadas");
+                } else {
+                    bulletTailEsp = false;
+                    __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "Trilhas de tiro bloqueadas: sem NPCs armados compativeis, factory ou jogador invalido");
+                }
+            } else {
+                bulletTailEsp = false;
+                pendingBulletTailClear = true;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "Trilhas de tiro por frame desativadas");
+            }
+            break;
+        case 46: // Limpar Trilhas de Tiro
+            if (IsProbablyValidPtr(GetBulletTailFactoryInstance())) {
+                pendingBulletTailClear = true;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "Limpeza de BulletTail agendada");
+            } else {
+                __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "Limpeza de BulletTail bloqueada: factory indisponivel");
+            }
+            break;
+        case 47: // ESP Inimigos no Minimapa
+            if (boolean) {
+                if (CanUseMiniMapEnemyEsp()) {
+                    minimapEnemyEsp = true;
+                    pendingMiniMapEspRefresh = true;
+                    __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "ESP de inimigos no minimapa ativado");
+                } else {
+                    minimapEnemyEsp = false;
+                    __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "ESP de inimigos no minimapa bloqueado: UI ou inimigos nao estao prontos");
+                }
+            } else {
+                minimapEnemyEsp = false;
+                pendingMiniMapEspClear = true;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "ESP de inimigos no minimapa desativado");
+            }
+            break;
+        case 48: // Mostrar Texto de Teste
+            pendingShowWordsTest = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "Texto de teste agendado para UI_WordsHints");
+            break;
+        case 49: // Mostrar Texto Custom
+            if (str != NULL) {
+                const char* inputText = env->GetStringUTFChars(str, 0);
+                if (inputText && inputText[0] != '\0') {
+                    std::strncpy(pendingCustomWordsText, inputText, sizeof(pendingCustomWordsText) - 1);
+                    pendingCustomWordsText[sizeof(pendingCustomWordsText) - 1] = '\0';
+                    pendingShowWordsCustom = true;
+                    __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "Texto custom agendado: %s", pendingCustomWordsText);
+                } else {
+                    __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "Texto custom ignorado: string vazia");
+                }
+                if (inputText) {
+                    env->ReleaseStringUTFChars(str, inputText);
+                }
+            } else {
+                __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "Texto custom ignorado: jstring nula");
             }
             break;
     }
@@ -2446,7 +2818,6 @@ void RunAutoKillOnce() {
 
         void* gameCtrl = GetGameCtrlInstance();
         if (!IsProbablyValidPtr(gameCtrl)) return;
-
         void* enermyGC = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x24);      // GameCtrl.m_pEnermyGC
         void* enemyFactory = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x28);   // GameCtrl.m_pEnemyFactory
         void* missionCtrl = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x2C);    // GameCtrl.m_MissionCtrl
@@ -2667,5 +3038,638 @@ void HideTargetMarker() {
         __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "Marcador visual ocultado");
     } catch (...) {
         __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Exceção ao ocultar marcador");
+    }
+}
+
+void* GetBulletTailFactoryInstance() {
+    uintptr_t addrGetInstance = getAbsoluteAddress(targetLibName, 0x394D8C); // BulletTailFactory.GetInstance()
+    if (addrGetInstance == 0) return nullptr;
+    auto getInstance = reinterpret_cast<GetBulletTailFactoryInstanceFunc>(addrGetInstance);
+    return getInstance(nullptr);
+}
+
+static bool ResolvePlayerStartPos(void* myPlayer, Vector3& outStartPos) {
+    if (!IsProbablyValidPtr(myPlayer)) return false;
+
+    try {
+        uintptr_t addrPlayerGetPosition = getAbsoluteAddress(targetLibName, 0x341378); // Player.GetPosition()
+        if (addrPlayerGetPosition != 0) {
+            auto getPlayerPosition = reinterpret_cast<PlayerGetPositionFunc>(addrPlayerGetPosition);
+            outStartPos = getPlayerPosition(myPlayer, nullptr);
+            return true;
+        }
+
+        uintptr_t addrMyCtrlGetPosition = getAbsoluteAddress(targetLibName, 0x4499F8); // MyCtrlPlayer.GetPosition()
+        void* myCtrlPlayer = GetMyCtrlPlayerInstance();
+        if (addrMyCtrlGetPosition != 0 && IsProbablyValidPtr(myCtrlPlayer)) {
+            auto getMyCtrlPosition = reinterpret_cast<MyCtrlPlayerGetPositionFunc>(addrMyCtrlGetPosition);
+            outStartPos = getMyCtrlPosition(myCtrlPlayer, nullptr);
+            return true;
+        }
+    } catch (...) {
+    }
+
+    return false;
+}
+
+static bool IsBulletTailCompatibleEnemyBase(void* enemyBase, void** outPlayer) {
+    if (outPlayer) *outPlayer = nullptr;
+    if (!IsProbablyValidPtr(enemyBase)) return false;
+
+    try {
+        void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0x14); // PlayerBase.m_dPlayerBaseData
+        if (!IsProbablyValidPtr(baseData)) return false;
+
+        void* property = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0x8); // PlayerBaseData.m_dProperty
+        if (!IsProbablyValidPtr(property)) return false;
+
+        int baseType = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0xC);      // PlayerBaseProperty.baseType
+        int maxBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x10);      // PlayerBaseProperty.m_dMaxBlood
+        int currentBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x14);  // PlayerBaseProperty.m_dCurrentBlood
+        if (baseType != EnemyNPC || maxBlood <= 0 || currentBlood <= 0) {
+            return false;
+        }
+
+        void* aiData = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0xC); // PlayerBaseData.m_dAIdata
+        if (!IsProbablyValidPtr(aiData)) return false;
+
+        int gunID = *reinterpret_cast<int*>(reinterpret_cast<char*>(aiData) + 0x10); // AIdata.gunID
+        if (gunID <= 0) return false;
+
+        void* player = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0xC); // PlayerBase.m_dPlayer
+        if (!IsProbablyValidPtr(player)) return false;
+
+        // Garante que pelo menos um mount/gun transform relevante exista.
+        void* gunRightHand = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x74);
+        void* gunMiddleFront = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x80);
+        void* head = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x3C);
+        if (!IsProbablyValidPtr(gunRightHand) && !IsProbablyValidPtr(gunMiddleFront) && !IsProbablyValidPtr(head)) {
+            return false;
+        }
+
+        if (outPlayer) *outPlayer = player;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool PlayerContainsTransform(void* player, void* targetTransform) {
+    if (!IsProbablyValidPtr(player) || !IsProbablyValidPtr(targetTransform)) return false;
+
+    try {
+        const int transformOffsets[] = {
+                0x24, // Root
+                0x28, // Body
+                0x38, // Neck
+                0x3C, // Head
+                0x48, // RHand
+                0x54, // LHand
+                0x74, // gunRightHand
+                0x80  // gunMiddleFront
+        };
+
+        for (int offset : transformOffsets) {
+            void* current = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + offset);
+            if (current == targetTransform) return true;
+        }
+    } catch (...) {
+    }
+
+    return false;
+}
+
+static void* ResolveTargetPlayerForBulletTail() {
+    void* myCtrlPlayer = GetMyCtrlPlayerInstance();
+    if (!IsProbablyValidPtr(myCtrlPlayer)) return nullptr;
+
+    void* targetTransform = FindBestTarget(myCtrlPlayer);
+    if (!IsProbablyValidPtr(targetTransform)) return nullptr;
+
+    void* players[256] = {};
+    int trackedPlayers = CollectTrackedPlayers(players, 256);
+    for (int i = 0; i < trackedPlayers; ++i) {
+        void* player = players[i];
+        if (!IsProbablyValidPtr(player)) continue;
+        if (player == GetMyPlayerInstance()) continue;
+        if (PlayerContainsTransform(player, targetTransform)) {
+            return player;
+        }
+    }
+
+    return nullptr;
+}
+
+bool CanUseBulletTail() {
+    if (!IsProbablyValidPtr(GetBulletTailFactoryInstance())) return false;
+
+    void* myPlayer = GetMyPlayerInstance();
+    if (!IsProbablyValidPtr(myPlayer)) return false;
+
+    Vector3 startPos = {0.0f, 0.0f, 0.0f};
+    if (!ResolvePlayerStartPos(myPlayer, startPos)) return false;
+
+    void* enemies[16] = {};
+    int enemyCount = CollectActiveEnemyBases(enemies, 16);
+    for (int i = 0; i < enemyCount; ++i) {
+        if (IsBulletTailCompatibleEnemyBase(enemies[i], nullptr)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool GenerateBulletTailForPlayer(void* factory, const Vector3& startPos, void* targetPlayer, bool isHit) {
+    if (!IsProbablyValidPtr(factory) || !IsProbablyValidPtr(targetPlayer)) return false;
+
+    uintptr_t addrGenerate = getAbsoluteAddress(targetLibName, 0x394DF0); // BulletTailFactory.GenerateEnemyBulletTail()
+    if (addrGenerate == 0) return false;
+
+    auto generateBulletTail = reinterpret_cast<GenerateEnemyBulletTailFunc>(addrGenerate);
+    generateBulletTail(factory, startPos, targetPlayer, isHit, nullptr);
+    return true;
+}
+
+int GenerateBulletTailForAllActiveEnemies() {
+    try {
+        void* factory = GetBulletTailFactoryInstance();
+        void* myPlayer = GetMyPlayerInstance();
+        if (!IsProbablyValidPtr(factory) || !IsProbablyValidPtr(myPlayer)) {
+            return 0;
+        }
+
+        Vector3 startPos = {0.0f, 0.0f, 0.0f};
+        if (!ResolvePlayerStartPos(myPlayer, startPos)) {
+            return 0;
+        }
+
+        void* enemies[128] = {};
+        int enemyCount = CollectActiveEnemyBases(enemies, 128);
+        if (enemyCount <= 0) {
+            return 0;
+        }
+
+        int generated = 0;
+        for (int i = 0; i < enemyCount; ++i) {
+            void* enemyBase = enemies[i];
+            void* targetPlayer = nullptr;
+            if (!IsBulletTailCompatibleEnemyBase(enemyBase, &targetPlayer)) continue;
+
+            if (GenerateBulletTailForPlayer(factory, startPos, targetPlayer, true)) {
+                generated++;
+            }
+        }
+
+        return generated;
+    } catch (...) {
+        return 0;
+    }
+}
+
+void TriggerBulletTailNow() {
+    try {
+        int generated = GenerateBulletTailForAllActiveEnemies();
+        if (generated <= 0) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "BulletTail bloqueado: nenhum inimigo ativo ou contexto invalido");
+            return;
+        }
+        __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "Trilhas de tiro geradas em %d alvos", generated);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Falha protegida ao gerar BulletTail");
+    }
+}
+
+void ClearBulletTailNow() {
+    try {
+        void* factory = GetBulletTailFactoryInstance();
+        if (!IsProbablyValidPtr(factory)) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "BulletTail clear ignorado: factory indisponivel");
+            return;
+        }
+
+        uintptr_t addrDestroyAll = getAbsoluteAddress(targetLibName, 0x395780); // BulletTailFactory.DestroyAllBulletTail()
+        if (addrDestroyAll == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "BulletTail clear bloqueado: endereco invalido");
+            return;
+        }
+
+        auto destroyAllBulletTail = reinterpret_cast<DestroyAllBulletTailFunc>(addrDestroyAll);
+        destroyAllBulletTail(factory, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "Todas as trilhas de tiro foram limpas");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Falha protegida ao limpar BulletTail");
+    }
+}
+
+void* GetMiniMapIconCtrlInstance() {
+    void* uiManage = GetUIManageInstance();
+    if (!IsProbablyValidPtr(uiManage)) return nullptr;
+
+    try {
+        void* uiCommon = *reinterpret_cast<void**>(reinterpret_cast<char*>(uiManage) + 0x10); // UI_Manage.uiCommon
+        if (!IsProbablyValidPtr(uiCommon)) return nullptr;
+
+        void* uiMiniMapCtrl = *reinterpret_cast<void**>(reinterpret_cast<char*>(uiCommon) + 0x14); // UI_Common.uiMiniMapCtrl
+        if (!IsProbablyValidPtr(uiMiniMapCtrl)) return nullptr;
+
+        void* uiIconCtrl = *reinterpret_cast<void**>(reinterpret_cast<char*>(uiMiniMapCtrl) + 0x14); // UI_MiniMapCtrl.uiIconCtrl
+        return IsProbablyValidPtr(uiIconCtrl) ? uiIconCtrl : nullptr;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+static void* GetWordsHintsInstance() {
+    void* uiManage = GetUIManageInstance();
+    if (!IsProbablyValidPtr(uiManage)) return nullptr;
+
+    try {
+        void* uiCommon = *reinterpret_cast<void**>(reinterpret_cast<char*>(uiManage) + 0x10); // UI_Manage.uiCommon
+        if (!IsProbablyValidPtr(uiCommon)) return nullptr;
+
+        void* wordsHints = *reinterpret_cast<void**>(reinterpret_cast<char*>(uiCommon) + 0x10); // UI_Common.uiWordHints
+        return IsProbablyValidPtr(wordsHints) ? wordsHints : nullptr;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+static void* CreateManagedString(const char* text) {
+    if (!text || !text[0]) return nullptr;
+
+    void* handle = dlopen((const char*)targetLibName, RTLD_NOW);
+    if (!handle) return nullptr;
+
+    void* sym = dlsym(handle, "il2cpp_string_new");
+    if (!sym) return nullptr;
+
+    auto il2cppStringNew = reinterpret_cast<Il2CppStringNewFunc>(sym);
+    return il2cppStringNew(text);
+}
+
+void ShowWordsHintText(const char* text, float showTime) {
+    if (!text || !text[0]) {
+        __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "UI_WordsHints ignorado: texto vazio");
+        return;
+    }
+
+    void* wordsHints = GetWordsHintsInstance();
+    if (!IsProbablyValidPtr(wordsHints)) {
+        __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "UI_WordsHints indisponivel");
+        return;
+    }
+
+    try {
+        uintptr_t addrPlayDisappearAni = getAbsoluteAddress(targetLibName, 0x313B50); // UI_WordsHints.PlayDisappearAni(string, float)
+        if (addrPlayDisappearAni == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Endereco invalido para UI_WordsHints.PlayDisappearAni");
+            return;
+        }
+
+        void* managedString = CreateManagedString(text);
+        if (!managedString) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Falha ao criar string IL2CPP para UI_WordsHints");
+            return;
+        }
+
+        auto playWordsHint = reinterpret_cast<PlayWordsHintsWithTimeFunc>(addrPlayDisappearAni);
+        playWordsHint(wordsHints, managedString, showTime, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "Texto exibido via UI_WordsHints: %s", text);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Falha protegida ao exibir texto via UI_WordsHints");
+    }
+}
+
+static int GetListCountSafe(void* listPtr) {
+    if (!IsProbablyValidPtr(listPtr)) return 0;
+
+    try {
+        auto* list = reinterpret_cast<Il2CppList<void*>*>(listPtr);
+        if (!list || !list->items) return 0;
+        int size = list->size;
+        return (size > 0 && size <= 512) ? size : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+static const char* GetSceneName(int sceneValue) {
+    switch (sceneValue) {
+        case GameScene_NoviceVillage: return "CENA: NOVICE VILLAGE";
+        case GameScene_Cell: return "CENA: CELL";
+        case GameScene_Canyon: return "CENA: CANYON";
+        case GameScene_Forest: return "CENA: FOREST";
+        case GameScene_Bar: return "CENA: BAR";
+        case GameScene_Mine: return "CENA: MINE";
+        case GameScene_Cemetery: return "CENA: CEMETERY";
+        default: return nullptr;
+    }
+}
+
+static void* GetPlayerBaseFromPlayer(void* player) {
+    if (!IsProbablyValidPtr(player)) return nullptr;
+
+    try {
+        void* playerBase = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0xC); // Player.m_player
+        return IsProbablyValidPtr(playerBase) ? playerBase : nullptr;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+static bool GetTargetKindText(char* outText, size_t outSize) {
+    if (!outText || outSize == 0) return false;
+    outText[0] = '\0';
+
+    void* targetPlayer = ResolveTargetPlayerForBulletTail();
+    if (!IsProbablyValidPtr(targetPlayer)) return false;
+
+    void* playerBase = GetPlayerBaseFromPlayer(targetPlayer);
+    if (!IsProbablyValidPtr(playerBase)) return false;
+
+    try {
+        void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(playerBase) + 0x14); // PlayerBase.m_dPlayerBaseData
+        if (!IsProbablyValidPtr(baseData)) return false;
+
+        void* property = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0x8); // PlayerBaseData.m_dProperty
+        if (!IsProbablyValidPtr(property)) return false;
+
+        int baseType = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0xC);
+        int modelType = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x8);
+
+        switch (baseType) {
+            case EnemyNPC:
+                std::snprintf(outText, outSize, "ALVO: NPC ARMADO");
+                return true;
+            case Zombies:
+                std::snprintf(outText, outSize, "ALVO: ZUMBI");
+                return true;
+            case Ogre:
+                std::snprintf(outText, outSize, "ALVO: OGRO");
+                return true;
+            case Animal:
+                switch (modelType) {
+                    case 8: std::snprintf(outText, outSize, "ALVO: CHEETAH"); return true;
+                    case 9: std::snprintf(outText, outSize, "ALVO: BEAR"); return true;
+                    case 10: std::snprintf(outText, outSize, "ALVO: WOLF"); return true;
+                    case 11: std::snprintf(outText, outSize, "ALVO: DEER"); return true;
+                    case 12: std::snprintf(outText, outSize, "ALVO: EAGLE"); return true;
+                    case 13: std::snprintf(outText, outSize, "ALVO: FOX"); return true;
+                    default: std::snprintf(outText, outSize, "ALVO: ANIMAL"); return true;
+                }
+            case MissionPerson:
+                std::snprintf(outText, outSize, "ALVO: NPC DE MISSAO");
+                return true;
+            case NonPermanentNpc:
+                std::snprintf(outText, outSize, "ALVO: NPC DO MAPA");
+                return true;
+            case Horse:
+                std::snprintf(outText, outSize, "ALVO: CAVALO");
+                return true;
+            default:
+                return false;
+        }
+    } catch (...) {
+        return false;
+    }
+}
+
+static const char* GetMissionStatusText() {
+    void* missionCtrl = GetMissionCtrlInstance();
+    if (!IsProbablyValidPtr(missionCtrl)) return nullptr;
+
+    try {
+        uintptr_t addrGetMainState = getAbsoluteAddress(targetLibName, 0x271EE0); // MissionCtrl.GetMissionMainState()
+        uintptr_t addrGetBranchState = getAbsoluteAddress(targetLibName, 0x271F6C); // MissionCtrl.GetMissionBranchState()
+        if (addrGetMainState == 0 || addrGetBranchState == 0) return nullptr;
+
+        auto getMainState = reinterpret_cast<MissionCtrlGetStateFunc>(addrGetMainState);
+        auto getBranchState = reinterpret_cast<MissionCtrlGetStateFunc>(addrGetBranchState);
+
+        int mainState = getMainState(missionCtrl, nullptr);
+        int branchState = getBranchState(missionCtrl, nullptr);
+
+        if (mainState == 1) return "MISSAO PRINCIPAL ATIVA";
+        if (branchState == 1) return "MISSAO SECUNDARIA ATIVA";
+        if (mainState == 2 && branchState == 2) return "TODAS AS MISSOES FINALIZADAS";
+        if (mainState == 0 && branchState == 0) return "SEM MISSAO ATIVA";
+    } catch (...) {
+    }
+
+    return nullptr;
+}
+
+void ProcessGameplayHints() {
+    static bool initialized = false;
+    static bool lastCompleteEsp = false;
+    static bool lastAutoKill = false;
+    static bool lastBulletTailEsp = false;
+    static bool lastAimBot = false;
+    static bool lastAimBotAggressive = false;
+    static int lastScene = -1;
+    static int lastEnemyCount = -1;
+    static int lastPoliceCount = -1;
+    static int lastTrackedPlayers = -1;
+    static char lastTargetText[64] = {0};
+    static char lastMissionText[64] = {0};
+
+    if (!initialized) {
+        void* initialTracked[256] = {};
+        lastCompleteEsp = completeEsp;
+        lastAutoKill = autoKill;
+        lastBulletTailEsp = bulletTailEsp;
+        lastAimBot = aimBot;
+        lastAimBotAggressive = aimBotAggressive;
+        lastScene = GetCurrentGameSceneValue();
+        lastTrackedPlayers = CollectTrackedPlayers(initialTracked, 256);
+        initialized = true;
+    }
+
+    if (lastCompleteEsp != completeEsp) {
+        ShowWordsHintText(completeEsp ? "ESP COMPLETO ON" : "ESP COMPLETO OFF", 2.0f);
+        lastCompleteEsp = completeEsp;
+    }
+
+    if (lastAutoKill != autoKill) {
+        ShowWordsHintText(autoKill ? "AUTO KILL ON" : "AUTO KILL OFF", 2.0f);
+        lastAutoKill = autoKill;
+    }
+
+    if (lastBulletTailEsp != bulletTailEsp) {
+        ShowWordsHintText(bulletTailEsp ? "TRAIL ESP ON" : "TRAIL ESP OFF", 2.0f);
+        lastBulletTailEsp = bulletTailEsp;
+    }
+
+    if (lastAimBot != aimBot) {
+        ShowWordsHintText(aimBot ? "AIMBOT ON" : "AIMBOT OFF", 2.0f);
+        lastAimBot = aimBot;
+    }
+
+    if (lastAimBotAggressive != aimBotAggressive) {
+        ShowWordsHintText(aimBotAggressive ? "AIMBOT AGRESSIVO ON" : "AIMBOT AGRESSIVO OFF", 2.0f);
+        lastAimBotAggressive = aimBotAggressive;
+    }
+
+    int currentScene = GetCurrentGameSceneValue();
+    if (currentScene != lastScene) {
+        const char* sceneText = GetSceneName(currentScene);
+        if (sceneText) ShowWordsHintText(sceneText, 2.5f);
+        lastScene = currentScene;
+    }
+
+    void* enemies[128] = {};
+    int enemyCount = CollectActiveEnemyBases(enemies, 128);
+    if (enemyCount != lastEnemyCount) {
+        char buffer[64] = {0};
+        if (enemyCount == 0 && lastEnemyCount > 0) {
+            ShowWordsHintText("AREA LIMPA", 2.5f);
+        } else if (enemyCount > 0 && enemyCount <= 5) {
+            std::snprintf(buffer, sizeof(buffer), "INIMIGOS RESTANTES: %d", enemyCount);
+            ShowWordsHintText(buffer, 2.2f);
+        }
+        lastEnemyCount = enemyCount;
+    }
+
+    void* missionCtrl = GetMissionCtrlInstance();
+    if (IsProbablyValidPtr(missionCtrl)) {
+        int policeCount = GetListCountSafe(*reinterpret_cast<void**>(reinterpret_cast<char*>(missionCtrl) + 0x44)); // policePlayers
+        if (policeCount != lastPoliceCount) {
+            char buffer[64] = {0};
+            if (policeCount > 0) {
+                std::snprintf(buffer, sizeof(buffer), "POLICIA ATIVA: %d", policeCount);
+                ShowWordsHintText(buffer, 2.3f);
+            } else if (lastPoliceCount > 0) {
+                ShowWordsHintText("POLICIA DISPERSA", 2.0f);
+            }
+            lastPoliceCount = policeCount;
+        }
+
+        const char* missionText = GetMissionStatusText();
+        if (missionText && std::strncmp(missionText, lastMissionText, sizeof(lastMissionText) - 1) != 0) {
+            ShowWordsHintText(missionText, 2.3f);
+            std::strncpy(lastMissionText, missionText, sizeof(lastMissionText) - 1);
+            lastMissionText[sizeof(lastMissionText) - 1] = '\0';
+        }
+    }
+
+    int trackedPlayers = 0;
+    void* tracked[256] = {};
+    trackedPlayers = CollectTrackedPlayers(tracked, 256);
+    if (lastTrackedPlayers >= 0 && trackedPlayers > lastTrackedPlayers) {
+        int delta = trackedPlayers - lastTrackedPlayers;
+        char buffer[64] = {0};
+        if (delta == 1) {
+            std::snprintf(buffer, sizeof(buffer), "NPC GERADO COM SUCESSO");
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "NPCS GERADOS: +%d", delta);
+        }
+        ShowWordsHintText(buffer, 2.2f);
+    }
+    lastTrackedPlayers = trackedPlayers;
+
+    char targetText[64] = {0};
+    if (GetTargetKindText(targetText, sizeof(targetText))) {
+        if (std::strncmp(targetText, lastTargetText, sizeof(lastTargetText) - 1) != 0) {
+            ShowWordsHintText(targetText, 1.8f);
+            std::strncpy(lastTargetText, targetText, sizeof(lastTargetText) - 1);
+            lastTargetText[sizeof(lastTargetText) - 1] = '\0';
+        }
+    } else if (lastTargetText[0] != '\0') {
+        lastTargetText[0] = '\0';
+    }
+}
+
+bool CanUseMiniMapEnemyEsp() {
+    if (!IsProbablyValidPtr(GetMiniMapIconCtrlInstance())) return false;
+
+    void* enemies[8] = {};
+    int enemyCount = CollectActiveEnemyBases(enemies, 8);
+    for (int i = 0; i < enemyCount; ++i) {
+        void* enemyBase = enemies[i];
+        if (!IsProbablyValidPtr(enemyBase)) continue;
+
+        void* player = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0xC); // PlayerBase.m_dPlayer
+        if (!IsProbablyValidPtr(player)) continue;
+
+        void* root = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x24); // Player.Root
+        if (IsProbablyValidPtr(root)) return true;
+    }
+
+    return false;
+}
+
+void ClearMiniMapEnemyEsp() {
+    void* iconCtrl = GetMiniMapIconCtrlInstance();
+    if (!IsProbablyValidPtr(iconCtrl)) return;
+
+    try {
+        uintptr_t addrDestroyHint = getAbsoluteAddress(targetLibName, 0x41F774); // UI_MiniMap_IconCtrl.DestroyHint(MiniMapHintsType, Transform, bool)
+        if (addrDestroyHint == 0) return;
+
+        auto destroyHint = reinterpret_cast<DestroyMiniMapHintByTargetFunc>(addrDestroyHint);
+        void* enemies[128] = {};
+        int enemyCount = CollectActiveEnemyBases(enemies, 128);
+        for (int i = 0; i < enemyCount; ++i) {
+            void* enemyBase = enemies[i];
+            if (!IsProbablyValidPtr(enemyBase)) continue;
+
+            void* player = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0xC);
+            if (!IsProbablyValidPtr(player)) continue;
+
+            void* root = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x24);
+            if (!IsProbablyValidPtr(root)) continue;
+
+            destroyHint(iconCtrl, 10, root, false, nullptr); // MiniMapHintsType.EnemyPos
+        }
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Falha ao limpar ESP do minimapa");
+    }
+}
+
+void RefreshMiniMapEnemyEsp() {
+    void* iconCtrl = GetMiniMapIconCtrlInstance();
+    if (!IsProbablyValidPtr(iconCtrl)) return;
+
+    try {
+        uintptr_t addrMiniMapHintsCtor = getAbsoluteAddress(targetLibName, 0x26B194); // MiniMapHintsParam..ctor(MiniMapHintsType, Transform)
+        uintptr_t addrGenerateHint = getAbsoluteAddress(targetLibName, 0x41E88C); // UI_MiniMap_IconCtrl.GenerateMiniMapHints
+        uintptr_t addrDestroyHint = getAbsoluteAddress(targetLibName, 0x41F774); // UI_MiniMap_IconCtrl.DestroyHint(MiniMapHintsType, Transform, bool)
+        if (addrMiniMapHintsCtor == 0 || addrGenerateHint == 0 || addrDestroyHint == 0) return;
+
+        auto miniMapHintsCtor = reinterpret_cast<MiniMapHintsCtorByTargetFunc>(addrMiniMapHintsCtor);
+        auto generateHint = reinterpret_cast<GenerateMiniMapHintsFunc>(addrGenerateHint);
+        auto destroyHint = reinterpret_cast<DestroyMiniMapHintByTargetFunc>(addrDestroyHint);
+
+        void* enemies[128] = {};
+        int enemyCount = CollectActiveEnemyBases(enemies, 128);
+        int shown = 0;
+        for (int i = 0; i < enemyCount; ++i) {
+            void* enemyBase = enemies[i];
+            if (!IsProbablyValidPtr(enemyBase)) continue;
+
+            void* player = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0xC); // PlayerBase.m_dPlayer
+            if (!IsProbablyValidPtr(player)) continue;
+
+            void* root = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x24); // Player.Root
+            if (!IsProbablyValidPtr(root)) continue;
+
+            // MiniMapHintsParam is a managed object; instantiate using the class of an existing hint object path is unavailable,
+            // so we allocate conservatively as plain storage only after verifying constructor address.
+            void* param = malloc(0x40);
+            if (!param) continue;
+            memset(param, 0, 0x40);
+
+            miniMapHintsCtor(param, 10, root, nullptr); // MiniMapHintsType.EnemyPos
+            destroyHint(iconCtrl, 10, root, false, nullptr);
+            generateHint(iconCtrl, param, nullptr);
+            free(param);
+            shown++;
+        }
+
+        if (shown > 0) {
+            __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "ESP do minimapa atualizado em %d inimigos", shown);
+        }
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Falha protegida ao atualizar ESP do minimapa");
     }
 }
