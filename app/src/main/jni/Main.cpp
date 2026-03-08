@@ -1,6 +1,7 @@
 #include <pthread.h>
 #include <jni.h>
 #include <unistd.h>
+#include <cstdint>
 #include <android/log.h>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
@@ -42,9 +43,9 @@ enum DropGoodsType {
 // ✅ SetPlayerOffHorse: Agora usa GetOffHorse.get_Instance() (0x465150) - MÉTODO SEGURO  
 // ✅ AimBot V5: SISTEMA AGRESSIVO com offsets E campos reais do dump.cs
 // ✅ Proteção Anti-Cowboy: JAMAIS mira em Cowboy = 1 (PlayerBaseType + AnimalType)
-// ✅ Busca Múltipla: AimTargetPlayer(0x24) + targetPlayer(0x30) + GetTargetPlayer()
-// ✅ Offsets Reais: aimTargetState(0x20), AimTargetPlayer(0x24), baseType(0xC), animalType(0x8)
-// ✅ Mira Agressiva: Força Aiming_Focus + atualiza campos diretos + dupla chamada
+// ✅ Busca de alvo segura: AimTargetPlayer(0x24) + AimTargetForCamera(0x28)
+// ✅ Offsets Reais: aimTargetState(0x20), AimTargetPlayer(0x24), AimTargetForCamera(0x28)
+// ✅ Mira estável: Força Aiming_Focus apenas com alvo válido (Transform)
 // ✅ EnemyPosCtrl: Acesso real à lista de inimigos (0x2E66C4)
 // ✅ PlayerBaseType: Enum para distinguir Cowboy, EnemyNPC, Animal, Zombies, etc
 // ✅ Anti-Crash: Estados do jogo ao invés de funções diretas para cavalo
@@ -69,9 +70,25 @@ bool instantReload = false;
 bool speedHack = false;
 bool autoAim = false;
 bool aimBot = false;                 // 🎯 AimBot Inteligente - caça inimigos automaticamente
+bool aimBotAggressive = false;       // ⚡ Aimbot agressivo (mais tentativas por frame)
 bool alwaysHeadshot = false;         // 💀 Força todos os tiros como headshot
+bool flyMode = false;                // 🕊️ Modo voo experimental
+bool completeEsp = false;            // 👁️ ESP completo com barras de vida
+bool autoKill = false;               // ☠️ Mata inimigos ativos com BeHit
 int sliderValue = 1, Moedas = 0, Gems = 0;
 float speedMultiplier = 1.0f;
+float flyVerticalSpeed = 5.0f;
+float flyHeightStep = 1.0f;
+
+// Ações pendentes para execução em contexto de jogo
+volatile bool pendingGeneratePolice = false;
+volatile bool pendingHidePolice = false;
+volatile bool pendingShowPolice = false;
+volatile bool pendingCreateMissionHints = false;
+volatile bool pendingDestroyMissionHints = false;
+volatile bool pendingEspRefresh = false;
+volatile bool pendingEspClear = false;
+volatile bool pendingAutoKillBurst = false;
 
 // Estrutura para dados do jogador em tempo real
 struct MyPlayerRealtimeData {
@@ -84,6 +101,41 @@ struct Vector3 {
     float x;
     float y;
     float z;
+};
+
+template <typename T>
+struct Il2CppArray {
+    void* klass;
+    void* monitor;
+    void* bounds;
+    uint32_t max_length;
+    T items[0];
+};
+
+template <typename T>
+struct Il2CppList {
+    void* klass;
+    void* monitor;
+    Il2CppArray<T>* items;
+    int size;
+    int version;
+    void* syncRoot;
+};
+
+template <typename TKey, typename TValue>
+struct Il2CppDictionary {
+    void* klass;
+    void* monitor;
+    void* table;
+    void* linkSlots;
+    Il2CppArray<TKey>* keySlots;
+    Il2CppArray<TValue>* valueSlots;
+    int touchedSlots;
+    int emptySlot;
+    int count;
+    int threshold;
+    void* hcp;
+    void* serialization_info;
 };
 
 // Estrutura para dados de origem do jogador (correta conforme dump.cs)
@@ -135,9 +187,18 @@ typedef void (*SetPlayerOnHorseFunc)();
 typedef void (*SetPlayerOffHorseFunc)();
 typedef void* (*GetOnHorseInstanceFunc)();
 typedef void* (*GetOffHorseInstanceFunc)();
-typedef void* (*EnemyPosCtrlGetInstanceFunc)();
+typedef void* (*EnemyPosCtrlGetInstanceFunc)(void* method);
+typedef void* (*MissionCtrlGetInstanceFunc)(void* method);
+typedef void* (*GameCtrlGetInstanceFunc)(void* method);
 typedef void (*ReloadBulletsFunc)();
 typedef float (*GetReloadTimeFunc)();
+typedef Vector3 (*ReadCurrentPlayerPositionFunc)();
+typedef Vector3 (*PlayerGetPositionFunc)(void* thisPtr, void* method);
+typedef void (*PlayerSetPositionFunc)(void* thisPtr, Vector3 pos, void* method);
+typedef void (*PlayerSetNavMeshEnableFunc)(void* thisPtr, bool enable, void* method);
+typedef void (*PlayerSetCurrentVelocityFunc)(void* thisPtr, Vector3 velocity, void* method);
+typedef Vector3 (*MyCtrlPlayerGetPositionFunc)(void* thisPtr, void* method);
+typedef void (*MyCtrlPlayerSetPositionFunc)(void* thisPtr, Vector3 pos, void* method);
 
 // Tipos de função corrigidos
 typedef MyPlayerOriData* (*GetMyPlayerOriDataFunc)();
@@ -213,6 +274,26 @@ enum NpcBountyHunterStates {
     BountyDrinkingCoffee = 3  // ✅ Beber café
 };
 
+enum MissionUnlockType {
+    MissionUnlock_Main = 0,
+    MissionUnlock_Branch = 1,
+    MissionUnlock_Daily = 2
+};
+
+enum GameScenes {
+    GameScene_FirstLoading = 0,
+    GameScene_Empty = 1,
+    GameScene_NoviceVillage = 2,
+    GameScene_Cell = 3,
+    GameScene_Canyon = 4,
+    GameScene_Forest = 5,
+    GameScene_Bar = 6,
+    GameScene_Mine = 7,
+    GameScene_Cemetery = 8,
+    GameScene_Null = 9,
+    GameScene_ForMinYUI = 10
+};
+
 // Tipos de Posições Policiais (do dump.cs)
 enum PoliceScenePosType {
     NV_PoliceStation = 5,     // ✅ Delegacia
@@ -221,26 +302,42 @@ enum PoliceScenePosType {
 
 typedef void (*UpdateAimTargetFunc)(void* thisPtr);
 typedef void (*SetAimStateFunc)(void* thisPtr, AimTargetState state, void* target, bool forceTarget);
-typedef void (*SetTargetPlayerFunc)(void* thisPtr, void* player);
-typedef void* (*GetTargetPlayerFunc)(void* thisPtr);
-typedef int (*GetClosestCharacterFunc)(void* verts, Vector3 pos);
-typedef PlayerBaseType (*GetPlayerBaseTypeFunc)(void* thisPtr);
-typedef AnimalType (*GetAnimalTypeFunc)(void* thisPtr);
 
 // ========== TIPOS DE FUNÇÃO PARA SISTEMA POLICIAL ==========
 typedef void* (*GetNPCenemyOriDataFunc)(int ID);
-typedef int (*GetPoliceMaxNumFunc)();
-typedef void (*GeneratePoliceFunc)(void* thisPtr);
+typedef int (*GetPoliceMaxNumFunc)(void* method);
+typedef void (*GeneratePoliceFunc)(void* thisPtr, void* method);
 typedef Vector3 (*GetPoliceBurnPosFunc)(void* thisPtr, Vector3 playerPos, float minSqr, float maxSqr);
-typedef void (*HideNonNpcAndPoliceFunc)(void* thisPtr);
-typedef void (*RecoverNonNpcAndPoliceFunc)(void* thisPtr);
-typedef void* (*GetNpcSheriffInstanceFunc)();
-typedef void* (*GetNpcBountyHunterInstanceFunc)();
+typedef void (*HideNonNpcAndPoliceFunc)(void* thisPtr, void* method);
+typedef void (*RecoverNonNpcAndPoliceFunc)(void* thisPtr, void* method);
+typedef void* (*GetNpcSheriffInstanceFunc)(void* method);
+typedef void* (*GetNpcBountyHunterInstanceFunc)(void* method);
+typedef void* (*GetSceneInOutPosCtrlInstanceFunc)(void* method);
+typedef void (*CreateMissionHintsFunc)(void* thisPtr, int gameScene, int missionType, void* method);
+typedef void (*DestroyMissionHintsFunc)(void* thisPtr, void* method);
+typedef void* (*GetGunParticalEffectsCtrlInstanceFunc)(void* method);
+typedef void (*ToggleSceneMissionHintsFunc)(void* thisPtr, void* method);
+typedef void* (*GetUIManageInstanceFunc)(void* method);
+typedef void (*ShowAimFollowTargetUIFunc)(void* thisPtr, void* method);
+typedef void (*HideAimFollowTargetUIFunc)(void* thisPtr, void* method);
+typedef void (*SetAimFollowTargetUIFunc)(void* thisPtr, void* target, void* method);
+typedef void* (*GetEntityManagerInstanceFunc)(void* method);
+typedef void* (*GameCtrlGetEnemyActiveListFunc)(void* thisPtr, void* method);
+typedef void (*GenerateEnemyBloodFunc)(void* thisPtr, void* target, void* method);
+typedef void (*DestroyAllBloodFunc)(void* thisPtr, void* method);
+typedef void (*SetCurrentBloodValueFunc)(void* thisPtr, void* target, int blood, int maxBlood, void* method);
+typedef void (*SetCurrentBloodEnableFunc)(void* thisPtr, void* target, bool active, void* method);
+typedef void (*PlayerBaseBeHitFunc)(void* thisPtr, int loseBlood, int hurtPart, void* method);
+typedef void (*MyCtrlPlayerMyUpdateFunc)(void* thisPtr);
+typedef void (*MissionCtrlPlayerActionFunc)(void* thisPtr, void* player, void* method);
+typedef bool (*MissionEntityContainEnemyFunc)(void* thisPtr, void* playerBase, void* method);
+typedef void (*MissionEntityDeleteEnemyFunc)(void* thisPtr, void* playerBase, void* method);
+typedef bool (*EnemyFactoryContainPlayerBaseFunc)(void* thisPtr, void* playerBase, void* method);
+typedef void (*EnemyFactoryDeletePlayerBaseFunc)(void* thisPtr, void* playerBase, void* method);
+typedef void (*EnemyGCFunc)(void* thisPtr, void* player, void* method);
 
 // Declarações antecipadas das funções necessárias
-void* CallGetTargetPlayer(void* playerCtrl);
 void CallSetAimState(void* playerCtrl, AimTargetState state, void* target, bool forceTarget);
-void CallSetTargetPlayer(void* playerCtrl, void* target);
 
 // ========== DECLARAÇÕES ANTECIPADAS - SISTEMA POLICIAL ==========
 void* GetNPCenemyOriData(int ID);
@@ -249,117 +346,54 @@ void GeneratePolice(void* missionCtrl);
 Vector3 GetPoliceBurnPos(void* enemyPosCtrl, Vector3 playerPos, float minSqr, float maxSqr);
 void HideAllPolice(void* missionCtrl);
 void ShowAllPolice(void* missionCtrl);
+void* GetMissionCtrlInstance();
 void* GetSheriffInstance();
 void* GetBountyHunterInstance();
+void* GetSceneInOutPosCtrlInstance();
+void CreateMissionHints();
+void DestroyMissionHints();
+void* GetGunParticalEffectsCtrlInstance();
+void TurnOnSceneMissionHints();
+void TurnOffSceneMissionHints();
+void* GetUIManageInstance();
+void* GetPlayingUICreatorInstance();
+void* GetPlayingUIBloodFactoryInstance();
+void ShowTargetMarkerOnCurrentTarget();
+void HideTargetMarker();
+bool CanEnableCompleteESP();
+void RefreshCompleteESP();
+void ClearCompleteESP();
+void LogTrackedEntities();
+bool CanRunAutoKill();
+int CollectActiveEnemyBases(void** outEnemies, int maxEnemies);
+void RunAutoKillOnce();
+void ProcessGameplayFrame(void* myCtrlPlayer);
 
-/**
- * Verifica se um alvo é válido para o aimbot
- * @param target Ponteiro para o alvo potencial
- * @param playerCtrl Ponteiro para o controlador do jogador (para comparação)
- * @return true se o alvo é válido, false caso contrário
- */
-bool IsValidTarget(void* target, void* playerCtrl) {
+bool IsValidAimTransform(void* target, void* playerCtrl) {
     if (!target || target == playerCtrl) return false;
-    
-    // Verificação de validade do ponteiro
-    if ((uintptr_t)target < 0x10000000) return false;
-    
-    try {
-        // TENTATIVA 1: PlayerBaseType baseType; // 0xC (PlayerBaseProperty)
-        PlayerBaseType* baseTypePtr = (PlayerBaseType*)((char*)target + 0xC);
-        PlayerBaseType baseType = *baseTypePtr;
-        
-        // ❌ NUNCA mira no Cowboy (jogador)
-        if (baseType == Cowboy) return false;
-        
-        // ✅ Verifica se é um tipo válido de inimigo
-        bool isValidEnemyType = (baseType == Ogre ||         // PRIORIDADE MÁXIMA
-                                baseType == Zombies ||      // PRIORIDADE ALTA  
-                                baseType == EnemyNPC ||     // PRIORIDADE MÉDIA
-                                baseType == Animal);        // PRIORIDADE BAIXA
-        
-        if (isValidEnemyType) {
-            // VERIFICAÇÃO ADICIONAL: AnimalType animalType; // 0x8 (se disponível)
-            AnimalType* animalTypePtr = (AnimalType*)((char*)target + 0x8);
-            AnimalType animalType = *animalTypePtr;
-            
-            // ❌ Nunca mira em tipos específicos de Cowboy
-            if (animalType == AnimalCowboy) return false;
-            
-            // ✅ Tipos de animais hostis válidos
-            if (animalType >= BountyHunter && animalType <= Eagle) {
-                return true;
-            }
-            
-            return isValidEnemyType; // Fallback para PlayerBaseType
-        }
-        
-        return false;
-                
-    } catch (...) {
-        return false; // Se houver erro, não é um alvo válido
-    }
+    return (uintptr_t)target >= 0x10000000;
 }
 
 /**
- * Calcula prioridade de um alvo para o aimbot
- * @param target Ponteiro para o alvo
- * @return Valor de prioridade (maior = mais importante)
- */
-int GetTargetPriority(void* target) {
-    if (!target) return 0;
-    
-    try {
-        // OFFSET REAL DO DUMP.CS: PlayerBaseType baseType; // 0xC
-        PlayerBaseType* baseTypePtr = (PlayerBaseType*)((char*)target + 0xC);
-        PlayerBaseType baseType = *baseTypePtr;
-        
-        // Sistema de prioridades baseado nos tipos reais do dump.cs
-        switch (baseType) {
-            case Ogre:     return 100;  // ⚡ MÁXIMA - Ogros/Chefes
-            case Zombies:  return 80;   // ⚡ ALTA - Zumbis
-            case EnemyNPC: return 60;   // ⚡ MÉDIA - NPCs inimigos
-            case Animal:   return 40;   // ⚡ BAIXA - Animais hostis
-            default:       return 0;    // ❌ Não é alvo válido
-        }
-    } catch (...) {
-        return 0;
-    }
-}
-
-/**
- * Encontra o melhor alvo baseado em prioridade e proximidade
- * SISTEMA APRIMORADO: Usa estruturas reais do dump.cs
+ * Encontra alvo atual de mira no MyCtrlPlayer de forma segura.
+ * dump.cs:
+ * - AimTargetPlayer em 0x24
+ * - AimTargetForCamera em 0x28
  * @param playerCtrl Ponteiro para o controlador do jogador
- * @return Ponteiro para o melhor alvo ou nullptr
+ * @return Ponteiro para Transform alvo ou nullptr
  */
 void* FindBestTarget(void* playerCtrl) {
     if (!playerCtrl) return nullptr;
     
     try {
-        // OFFSET REAL: Transform AimTargetPlayer; // 0x24 (do dump.cs)
-        void** aimTargetPlayerPtr = (void**)((char*)playerCtrl + 0x24);
-        void* currentAimTarget = *aimTargetPlayerPtr;
-        
-        // Se já há um alvo de mira válido
-        if (currentAimTarget && IsValidTarget(currentAimTarget, playerCtrl)) {
-            return currentAimTarget;
-        }
-        
-        // ALTERNATIVA: Usar campo targetPlayer; // 0x30 se disponível
-        void** targetPlayerPtr = (void**)((char*)playerCtrl + 0x30);
-        void* targetPlayer = *targetPlayerPtr;
-        
-        if (targetPlayer && IsValidTarget(targetPlayer, playerCtrl)) {
-            return targetPlayer;
-        }
-        
-        // Se não há alvo válido nos campos diretos, usa a função
-        void* functionTarget = CallGetTargetPlayer(playerCtrl);
-        if (IsValidTarget(functionTarget, playerCtrl)) {
-            return functionTarget;
-        }
-        
+        void** aimTargetPlayerPtr = reinterpret_cast<void**>((char*)playerCtrl + 0x24);
+        void* currentAimTarget = aimTargetPlayerPtr ? *aimTargetPlayerPtr : nullptr;
+        if (IsValidAimTransform(currentAimTarget, playerCtrl)) return currentAimTarget;
+
+        void** aimTargetCameraPtr = reinterpret_cast<void**>((char*)playerCtrl + 0x28);
+        void* aimTargetForCamera = aimTargetCameraPtr ? *aimTargetCameraPtr : nullptr;
+        if (IsValidAimTransform(aimTargetForCamera, playerCtrl)) return aimTargetForCamera;
+
         return nullptr;
         
     } catch (...) {
@@ -434,6 +468,124 @@ void CallSaveCurrentPlayerPosition(Vector3 position) {
                         position.x, position.y, position.z);
 }
 
+void ForceAimRefresh(void* playerCtrl) {
+    if (!playerCtrl) return;
+    try {
+        // dump.cs: MyCtrlPlayer.aimTargetState // 0x20
+        AimTargetState* aimStatePtr = reinterpret_cast<AimTargetState*>((char*)playerCtrl + 0x20);
+        *aimStatePtr = Nobody;
+
+        // dump.cs: MyCtrlPlayer.AimTargetPlayer // 0x24
+        void** aimTargetPtr = reinterpret_cast<void**>((char*)playerCtrl + 0x24);
+        if (aimTargetPtr) *aimTargetPtr = nullptr;
+
+        // dump.cs: MyCtrlPlayer.AimTargetForCamera // 0x28
+        void** aimTargetCamPtr = reinterpret_cast<void**>((char*)playerCtrl + 0x28);
+        if (aimTargetCamPtr) *aimTargetCamPtr = nullptr;
+    } catch (...) {
+    }
+}
+
+Vector3 CallReadCurrentPlayerPosition() {
+    Vector3 pos = {0.0f, 0.0f, 0.0f};
+    uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x52F754);
+    if (baseAddress == 0) return pos;
+    auto readPosition = reinterpret_cast<ReadCurrentPlayerPositionFunc>(baseAddress);
+    return readPosition();
+}
+
+void* GetGameCtrlInstance() {
+    uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x2DDD44); // GameCtrl.GetInstance()
+    if (baseAddress == 0) return nullptr;
+    auto getGameCtrlInstance = reinterpret_cast<GameCtrlGetInstanceFunc>(baseAddress);
+    return getGameCtrlInstance(nullptr);
+}
+
+void* GetMyPlayerInstance() {
+    void* gameCtrl = GetGameCtrlInstance();
+    if (!gameCtrl) return nullptr;
+    // dump.cs: GameCtrl.myPlayer // 0x14
+    void** myPlayerPtr = reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x14);
+    if (!myPlayerPtr) return nullptr;
+    void* player = *myPlayerPtr;
+    if (!player || (uintptr_t)player < 0x10000000) return nullptr;
+    return player;
+}
+
+void* GetMyCtrlPlayerInstance() {
+    void* gameCtrl = GetGameCtrlInstance();
+    if (!gameCtrl) return nullptr;
+    // dump.cs: GameCtrl.m_pCtrlPlayer // 0x10
+    void** myCtrlPlayerPtr = reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x10);
+    if (!myCtrlPlayerPtr) return nullptr;
+    void* myCtrlPlayer = *myCtrlPlayerPtr;
+    if (!myCtrlPlayer || (uintptr_t)myCtrlPlayer < 0x10000000) return nullptr;
+    return myCtrlPlayer;
+}
+
+void* GetCtrlPlayerFromMyCtrl() {
+    void* myCtrlPlayer = GetMyCtrlPlayerInstance();
+    if (!myCtrlPlayer) return nullptr;
+    // dump.cs: MyCtrlPlayer.ctrlPlayer // 0xC
+    void** ctrlPlayerPtr = reinterpret_cast<void**>(reinterpret_cast<char*>(myCtrlPlayer) + 0xC);
+    if (!ctrlPlayerPtr) return nullptr;
+    void* ctrlPlayer = *ctrlPlayerPtr;
+    if (!ctrlPlayer || (uintptr_t)ctrlPlayer < 0x10000000) return nullptr;
+    return ctrlPlayer;
+}
+
+void SetFlyRuntimeState(bool enabled) {
+    void* ctrlPlayer = GetCtrlPlayerFromMyCtrl();
+    if (!ctrlPlayer) return;
+
+    uintptr_t addrSetNavMeshEnable = getAbsoluteAddress(targetLibName, 0x34897C); // Player.SetNavMesEnable(bool)
+    uintptr_t addrSetCurrentVelocity = getAbsoluteAddress(targetLibName, 0x35C8F8); // Player.SetCurrentVelocity(Vector3)
+    if (addrSetNavMeshEnable == 0 || addrSetCurrentVelocity == 0) return;
+
+    auto setNavMeshEnable = reinterpret_cast<PlayerSetNavMeshEnableFunc>(addrSetNavMeshEnable);
+    auto setCurrentVelocity = reinterpret_cast<PlayerSetCurrentVelocityFunc>(addrSetCurrentVelocity);
+
+    // Em voo, desativa NavMesh para não prender fora da malha; ao sair, reativa.
+    setNavMeshEnable(ctrlPlayer, !enabled, nullptr);
+
+    // Evita estado de velocidade residual que pode bloquear input.
+    Vector3 zeroVel = {0.0f, 0.0f, 0.0f};
+    setCurrentVelocity(ctrlPlayer, zeroVel, nullptr);
+}
+
+bool ApplyFlyPositionStep() {
+    // Usa MyCtrlPlayer para evitar desync visual ("fantasma")
+    void* myCtrlPlayer = GetMyCtrlPlayerInstance();
+    if (!myCtrlPlayer) return false;
+
+    uintptr_t addrGetPosMyCtrl = getAbsoluteAddress(targetLibName, 0x4499F8); // MyCtrlPlayer.GetPosition()
+    uintptr_t addrSetPosMyCtrl = getAbsoluteAddress(targetLibName, 0x45D69C); // MyCtrlPlayer.SetPosition(Vector3)
+    uintptr_t addrSetPosPlayer = getAbsoluteAddress(targetLibName, 0x348A38); // Player.SetPosition(Vector3)
+    if (addrGetPosMyCtrl == 0 || addrSetPosMyCtrl == 0 || addrSetPosPlayer == 0) return false;
+
+    auto getPosMyCtrl = reinterpret_cast<MyCtrlPlayerGetPositionFunc>(addrGetPosMyCtrl);
+    auto setPosMyCtrl = reinterpret_cast<MyCtrlPlayerSetPositionFunc>(addrSetPosMyCtrl);
+    auto setPosPlayer = reinterpret_cast<PlayerSetPositionFunc>(addrSetPosPlayer);
+
+    Vector3 pos = getPosMyCtrl(myCtrlPlayer, nullptr);
+    float deltaY = flyHeightStep * (flyVerticalSpeed / 10.0f);
+    pos.y += deltaY;
+
+    // Atualiza controlador principal
+    setPosMyCtrl(myCtrlPlayer, pos, nullptr);
+
+    // Sincroniza também o Player real para não travar locomoção
+    void* ctrlPlayer = GetCtrlPlayerFromMyCtrl();
+    if (ctrlPlayer) {
+        setPosPlayer(ctrlPlayer, pos, nullptr);
+    }
+
+    // Mantém estado de locomoção consistente com modo voo.
+    SetFlyRuntimeState(flyMode);
+
+    return true;
+}
+
 /**
  * Coloca o jogador no cavalo usando o estado do jogo (MÉTODO SEGURO)
  */
@@ -497,6 +649,7 @@ void CallUpdateAimTarget(void* playerCtrl) {
     }
     
     uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x45CF6C);
+    if (baseAddress == 0 || baseAddress < 0x10000000) return;
     auto updateAimTarget = reinterpret_cast<UpdateAimTargetFunc>(baseAddress);
     updateAimTarget(playerCtrl);
     __android_log_print(ANDROID_LOG_INFO, "ModMenu", "Alvo de mira atualizado");
@@ -513,46 +666,9 @@ void CallSetAimState(void* playerCtrl, AimTargetState state, void* target, bool 
     if (!playerCtrl) return;
     
     uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4599AC);
+    if (baseAddress == 0 || baseAddress < 0x10000000) return;
     auto setAimState = reinterpret_cast<SetAimStateFunc>(baseAddress);
     setAimState(playerCtrl, state, target, forceTarget);
-}
-
-/**
- * Define o jogador alvo (com verificação de segurança)
- * @param playerCtrl Ponteiro para o controlador do jogador
- * @param target Ponteiro para o jogador alvo
- */
-void CallSetTargetPlayer(void* playerCtrl, void* target) {
-    if (!playerCtrl) return;
-    
-    try {
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x478E1C);
-        if (baseAddress == 0) return;
-        
-        auto setTargetPlayer = reinterpret_cast<SetTargetPlayerFunc>(baseAddress);
-        setTargetPlayer(playerCtrl, target);
-    } catch (...) {
-        // Silencioso
-    }
-}
-
-/**
- * Obtém o jogador alvo atual (com verificação de segurança)
- * @param playerCtrl Ponteiro para o controlador do jogador
- * @return Ponteiro para o jogador alvo ou nullptr
- */
-void* CallGetTargetPlayer(void* playerCtrl) {
-    if (!playerCtrl) return nullptr;
-    
-    try {
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x480DE4);
-        if (baseAddress == 0) return nullptr;
-        
-        auto getTargetPlayer = reinterpret_cast<GetTargetPlayerFunc>(baseAddress);
-        return getTargetPlayer(playerCtrl);
-    } catch (...) {
-        return nullptr;
-    }
 }
 
 /**
@@ -568,7 +684,7 @@ void* GetEnemyPosCtrlInstance() {
         }
         
         auto getEnemyPosCtrlInstance = reinterpret_cast<EnemyPosCtrlGetInstanceFunc>(baseAddress);
-        void* enemyPosCtrl = getEnemyPosCtrlInstance();
+        void* enemyPosCtrl = getEnemyPosCtrlInstance(nullptr);
         
         if (enemyPosCtrl) {
             __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIMBOT", "EnemyPosCtrl obtido com sucesso: %p", enemyPosCtrl);
@@ -595,7 +711,8 @@ void* GetNPCenemyOriData(int ID) {
         // Verifica se a biblioteca está carregada
         if (!isLibraryLoaded(targetLibName)) return nullptr;
         
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x49A8F0);
+        // dump.cs: PoliceLoader.GetNPCenemyOriData(int ID) -> RVA 0x31EDF0
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x31EDF0);
         if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return nullptr;
         
         // Verificação adicional de validade do endereço
@@ -621,7 +738,7 @@ int GetPoliceMaxNum() {
         // Verifica se a biblioteca está carregada
         if (!isLibraryLoaded(targetLibName)) return 5; // Valor padrão seguro
         
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4A2B40);
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x53A5A0);
         if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return 5;
         
         // Verificação de validade do endereço
@@ -630,7 +747,7 @@ int GetPoliceMaxNum() {
         auto getPoliceMaxNum = reinterpret_cast<GetPoliceMaxNumFunc>(baseAddress);
         if (!getPoliceMaxNum) return 5;
         
-        int result = getPoliceMaxNum();
+        int result = getPoliceMaxNum(nullptr);
         // Validação do resultado (valores razoáveis)
         if (result < 0 || result > 100) return 5;
         
@@ -657,7 +774,7 @@ void GeneratePolice(void* missionCtrl) {
         // Verifica se a biblioteca está carregada
         if (!isLibraryLoaded(targetLibName)) return;
         
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B1A20);
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x281598);
         if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return;
         
         // Verificação de validade do endereço
@@ -667,7 +784,7 @@ void GeneratePolice(void* missionCtrl) {
         if (!generatePolice) return;
         
         // Chama a função apenas se todas as verificações passaram
-        generatePolice(missionCtrl);
+        generatePolice(missionCtrl, nullptr);
         
     } catch (const std::exception& e) {
         // Exceção capturada - não faz nada
@@ -736,7 +853,7 @@ void HideAllPolice(void* missionCtrl) {
         // Verifica se a biblioteca está carregada
         if (!isLibraryLoaded(targetLibName)) return;
         
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B2F10);
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x278038);
         if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return;
         
         // Verificação de validade do endereço
@@ -745,7 +862,7 @@ void HideAllPolice(void* missionCtrl) {
         auto hideNonNpcAndPolice = reinterpret_cast<HideNonNpcAndPoliceFunc>(baseAddress);
         if (!hideNonNpcAndPolice) return;
         
-        hideNonNpcAndPolice(missionCtrl);
+        hideNonNpcAndPolice(missionCtrl, nullptr);
         
     } catch (const std::exception& e) {
         // Exceção capturada - operação falhou silenciosamente
@@ -769,7 +886,7 @@ void ShowAllPolice(void* missionCtrl) {
         // Verifica se a biblioteca está carregada
         if (!isLibraryLoaded(targetLibName)) return;
         
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4B3020);
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x27B5DC);
         if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return;
         
         // Verificação de validade do endereço
@@ -778,7 +895,7 @@ void ShowAllPolice(void* missionCtrl) {
         auto recoverNonNpcAndPolice = reinterpret_cast<RecoverNonNpcAndPoliceFunc>(baseAddress);
         if (!recoverNonNpcAndPolice) return;
         
-        recoverNonNpcAndPolice(missionCtrl);
+        recoverNonNpcAndPolice(missionCtrl, nullptr);
         
     } catch (const std::exception& e) {
         // Exceção capturada - operação falhou silenciosamente
@@ -796,7 +913,7 @@ void* GetSheriffInstance() {
         // Verifica se a biblioteca está carregada
         if (!isLibraryLoaded(targetLibName)) return nullptr;
         
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4C1A80);
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x486D8C);
         if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return nullptr;
         
         // Verificação de validade do endereço
@@ -805,7 +922,7 @@ void* GetSheriffInstance() {
         auto getSheriffInstance = reinterpret_cast<GetNpcSheriffInstanceFunc>(baseAddress);
         if (!getSheriffInstance) return nullptr;
         
-        void* instance = getSheriffInstance();
+        void* instance = getSheriffInstance(nullptr);
         
         // Verificação do resultado (instância válida)
         if (instance && (uintptr_t)instance >= 0x10000000) {
@@ -829,7 +946,7 @@ void* GetBountyHunterInstance() {
         // Verifica se a biblioteca está carregada
         if (!isLibraryLoaded(targetLibName)) return nullptr;
         
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4C2B90);
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x487098);
         if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return nullptr;
         
         // Verificação de validade do endereço
@@ -838,7 +955,7 @@ void* GetBountyHunterInstance() {
         auto getBountyHunterInstance = reinterpret_cast<GetNpcBountyHunterInstanceFunc>(baseAddress);
         if (!getBountyHunterInstance) return nullptr;
         
-        void* instance = getBountyHunterInstance();
+        void* instance = getBountyHunterInstance(nullptr);
         
         // Verificação do resultado (instância válida)
         if (instance && (uintptr_t)instance >= 0x10000000) {
@@ -916,13 +1033,13 @@ MyPlayerRealtimeData *hook_GetMyPlayerRealtimeData() {
 }
 
 // Ponteiro para função original GetHitBlood
-int (*original_GetHitBlood)(void *thisPtr, int part, int type, float enemy, float myPosition, int modelType);
+int (*original_GetHitBlood)(void *thisPtr, int part, int type, Vector3 enemy, Vector3 myPosition, int modelType);
 
 /**
  * Hook para a função GetHitBlood
  * Modifica o dano causado pelas balas (com verificações de segurança)
  */
-int hook_GetHitBlood(void *thisPtr, int part, int type, float enemy, float myPosition, int modelType) {
+int hook_GetHitBlood(void *thisPtr, int part, int type, Vector3 enemy, Vector3 myPosition, int modelType) {
     // Verificação de segurança para evitar crashes
     if (!thisPtr) {
         __android_log_print(ANDROID_LOG_ERROR, "MOD", "Erro: thisPtr é nulo em GetHitBlood");
@@ -1078,6 +1195,7 @@ float (*original_GetReloadTime)(void* thisPtr);
 // Ponteiros para funções de mira
 void (*original_UpdateAimTarget)(void* thisPtr);
 void (*original_SetAimState)(void* thisPtr, AimTargetState state, void* target, bool forceTarget);
+void (*original_MyCtrlPlayerMyUpdate)(void* thisPtr);
 
 /**
  * Hook para a função SetDropGoodNumber
@@ -1161,6 +1279,40 @@ MyPlayerOriData* hook_GetMyPlayerOriData() {
         data->dec = 5.0f;  // Desaceleração normal
     }
 
+    // Processa ações pendentes em contexto de jogo
+    if (pendingGeneratePolice || pendingHidePolice || pendingShowPolice ||
+        pendingCreateMissionHints || pendingDestroyMissionHints) {
+        void* missionCtrl = GetMissionCtrlInstance();
+        if (missionCtrl) {
+            if (pendingGeneratePolice) {
+                GeneratePolice(missionCtrl);
+                pendingGeneratePolice = false;
+            }
+            if (pendingHidePolice) {
+                HideAllPolice(missionCtrl);
+                pendingHidePolice = false;
+            }
+            if (pendingShowPolice) {
+                ShowAllPolice(missionCtrl);
+                pendingShowPolice = false;
+            }
+        }
+
+        if (pendingCreateMissionHints) {
+            CreateMissionHints();
+            pendingCreateMissionHints = false;
+        }
+
+        if (pendingDestroyMissionHints) {
+            DestroyMissionHints();
+            pendingDestroyMissionHints = false;
+        }
+    }
+
+    // Modo voo experimental:
+    // a movimentação vertical é aplicada imediatamente pelos sliders (cases 33/34),
+    // evitando conflito com locomoção normal.
+
     return data;
 }
 
@@ -1191,59 +1343,41 @@ void hook_UpdateAimTarget(void* thisPtr) {
     // Chama a função original primeiro
     original_UpdateAimTarget(thisPtr);
     
-    // Se autoAim estiver ativo, força estado de mira focada
-    if (autoAim) {
-        CallSetAimState(thisPtr, Aiming_Focus, nullptr, true);
-    }
-    
-    // ⚡ AIMBOT V5: BUSCA AGRESSIVA COM PROTEÇÃO ANTI-COWBOY
-    if (aimBot) {
-        static int framesToUpdate = 0;
-        framesToUpdate++;
-        
-        // Busca o melhor alvo disponível usando múltiplas estratégias
-        void* bestTarget = FindBestTarget(thisPtr);
-        
-        if (bestTarget) {
-            // ✅ ALVO VÁLIDO ENCONTRADO - APLICAR MIRA AGRESSIVA
-            int priority = GetTargetPriority(bestTarget);
-            
-            // FORÇA MIRA FOCADA para todos os alvos válidos
-            CallSetAimState(thisPtr, Aiming_Focus, bestTarget, true);
-            
-            // ATUALIZA CAMPOS DIRETOS da estrutura MyCtrlPlayer
-            try {
-                // OFFSET REAL: Transform AimTargetPlayer; // 0x24
-                void** aimTargetPtr = (void**)((char*)thisPtr + 0x24);
-                *aimTargetPtr = bestTarget;
-                
-                // OFFSET REAL: MyCtrlPlayer.AimTargetState aimTargetState; // 0x20
-                AimTargetState* aimStatePtr = (AimTargetState*)((char*)thisPtr + 0x20);
-                *aimStatePtr = Aiming_Focus;
-                
-                // FORÇA CHAMADA DE SetTargetPlayer
-                CallSetTargetPlayer(thisPtr, bestTarget);
-                
-            } catch (...) {
-                // Fallback silencioso
-            }
-            
-        } else {
-            // ❌ NENHUM ALVO VÁLIDO - BUSCA AGRESSIVA
-            if (framesToUpdate % 5 == 0) { // A cada 5 frames
-                // Força múltiplas chamadas da função original para acelerar busca
-                original_UpdateAimTarget(thisPtr);
-                original_UpdateAimTarget(thisPtr); // Dupla chamada para forçar
-                
-                // Tenta forçar atualizações no campo AimTargetState
-                try {
-                    AimTargetState* aimStatePtr = (AimTargetState*)((char*)thisPtr + 0x20);
-                    *aimStatePtr = Nobody; // Reset para forçar nova busca
-                } catch (...) {
-                    // Silencioso
-                }
-            }
+    if (!autoAim && !aimBot && !aimBotAggressive) return;
+
+    // Usa somente campos reais do MyCtrlPlayer (0x24/0x28).
+    void* bestTarget = FindBestTarget(thisPtr);
+
+    // Modo agressivo: força novos ciclos de aquisição quando ainda não há alvo.
+    if (!bestTarget && aimBotAggressive) {
+        static int aggressiveFrameCounter = 0;
+        aggressiveFrameCounter++;
+
+        if ((aggressiveFrameCounter % 2) == 0) {
+            ForceAimRefresh(thisPtr);
+            original_UpdateAimTarget(thisPtr);
+            original_UpdateAimTarget(thisPtr);
+            bestTarget = FindBestTarget(thisPtr);
         }
+    }
+
+    if (!bestTarget) return;
+
+    CallSetAimState(thisPtr, Aiming_Focus, bestTarget, true);
+
+    // Mantém estado interno consistente para reduzir flicker.
+    try {
+        AimTargetState* aimStatePtr = reinterpret_cast<AimTargetState*>((char*)thisPtr + 0x20);
+        *aimStatePtr = Aiming_Focus;
+
+        // Mantém ambos os campos de alvo alinhados em modo agressivo.
+        if (aimBotAggressive) {
+            void** aimTargetPtr = reinterpret_cast<void**>((char*)thisPtr + 0x24);
+            if (aimTargetPtr) *aimTargetPtr = bestTarget;
+            void** aimTargetCamPtr = reinterpret_cast<void**>((char*)thisPtr + 0x28);
+            if (aimTargetCamPtr) *aimTargetCamPtr = bestTarget;
+        }
+    } catch (...) {
     }
 }
 
@@ -1260,8 +1394,8 @@ void hook_SetAimState(void* thisPtr, AimTargetState state, void* target, bool fo
     
     AimTargetState finalState = state;
     
-    // Se autoAim estiver ativo, sempre força foco quando há um alvo
-    if (autoAim && target && state == Aiming_NotFocus) {
+    // Quando autoAim/aimBot ativos, mantém foco se houver alvo válido.
+    if ((autoAim || aimBot || aimBotAggressive) && target && state == Aiming_NotFocus) {
         finalState = Aiming_Focus;
         forceTarget = true;
         __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIM", "Auto-aim: Convertendo NotFocus para Focus");
@@ -1273,6 +1407,47 @@ void hook_SetAimState(void* thisPtr, AimTargetState state, void* target, bool fo
     
     // Chama a função original com possíveis modificações
     original_SetAimState(thisPtr, finalState, target, forceTarget);
+}
+
+void ProcessGameplayFrame(void* myCtrlPlayer) {
+    if (!myCtrlPlayer) return;
+
+    if (pendingEspClear) {
+        ClearCompleteESP();
+        pendingEspClear = false;
+    }
+
+    if (pendingEspRefresh) {
+        RefreshCompleteESP();
+        pendingEspRefresh = false;
+    }
+
+    if (pendingAutoKillBurst) {
+        RunAutoKillOnce();
+        pendingAutoKillBurst = false;
+    }
+
+    if (completeEsp && CanEnableCompleteESP()) {
+        static int espFrameCounter = 0;
+        espFrameCounter++;
+        if ((espFrameCounter % 45) == 0) {
+            RefreshCompleteESP();
+        }
+    }
+
+    if (autoKill && CanRunAutoKill()) {
+        static int autoKillFrameCounter = 0;
+        autoKillFrameCounter++;
+        if ((autoKillFrameCounter % 20) == 0) {
+            RunAutoKillOnce();
+        }
+    }
+}
+
+void hook_MyCtrlPlayerMyUpdate(void* thisPtr) {
+    if (!thisPtr) return;
+    original_MyCtrlPlayerMyUpdate(thisPtr);
+    ProcessGameplayFrame(thisPtr);
 }
 
 /**
@@ -1359,6 +1534,11 @@ void *hack_thread(void *) {
     MSHookFunction((void *) addr_UpdateAimTarget, (void *) &hook_UpdateAimTarget,
                    (void **) &original_UpdateAimTarget);
 
+    // Hook por-frame do jogador para ESP/auto-kill sem depender de tiro
+    uintptr_t addr_MyCtrlPlayerMyUpdate = getAbsoluteAddress(targetLibName, 0x4552A8);
+    MSHookFunction((void *) addr_MyCtrlPlayerMyUpdate, (void *) &hook_MyCtrlPlayerMyUpdate,
+                   (void **) &original_MyCtrlPlayerMyUpdate);
+
     // Hook para configuração de estado de mira
     uintptr_t addr_SetAimState = getAbsoluteAddress(targetLibName, 0x4599AC);
     MSHookFunction((void *) addr_SetAimState, (void *) &hook_SetAimState,
@@ -1379,55 +1559,74 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     const char *features[] = {
             // Recursos originais
             OBFUSCATE("Category_Menu de Modificações"),
-            OBFUSCATE("4_Toggle_Vida Infinita"),
-            OBFUSCATE("1_SeekBar_Dano de bala_1_999"),
-            OBFUSCATE("2_InputValue_Adicionar Moedas"),
-            OBFUSCATE("3_InputValue_Adicionar Gems"),
-            OBFUSCATE("5_SeekBar_Balas das Armas_1_999999"),
+            OBFUSCATE("4_Toggle_Vida Infinita (15/02/2026)"),
+            OBFUSCATE("1_SeekBar_Dano de bala (15/02/2026)_1_999"),
+            OBFUSCATE("2_InputValue_Adicionar Moedas (15/02/2026)"),
+            OBFUSCATE("3_InputValue_Adicionar Gems (15/02/2026)"),
+            OBFUSCATE("5_SeekBar_Balas das Armas (15/02/2026)_1_999999"),
 
             // Debug de inimigos
             OBFUSCATE("Category_Debug de Inimigos"),
-            OBFUSCATE("6_Toggle_Debug Posições de Inimigos"),
-            OBFUSCATE("7_Button_Forçar Remoção de Inimigos"),
+            OBFUSCATE("6_Toggle_Debug Posições de Inimigos (15/02/2026)"),
+            OBFUSCATE("7_Button_Forçar Remoção de Inimigos (15/02/2026)"),
 
             // Gerenciamento de itens
             OBFUSCATE("Category_Gerenciamento de Itens"),
-            OBFUSCATE("8_Toggle_Ouro/Diamantes Infinitos"),
-            OBFUSCATE("9_Toggle_Munição Infinita"),
-            OBFUSCATE("10_Toggle_Vida Infinita (Via Itens)"),
-            OBFUSCATE("11_Toggle_Recursos Infinitos"),
-            OBFUSCATE("12_Button_Adicionar Todas as Partes de Armas"),
-            OBFUSCATE("13_Button_Adicionar Todas as Peles"),
-            OBFUSCATE("14_Button_Adicionar 10 Whisky"),
+            OBFUSCATE("8_Toggle_Ouro/Diamantes Infinitos (15/02/2026)"),
+            OBFUSCATE("9_Toggle_Munição Infinita (15/02/2026)"),
+            OBFUSCATE("10_Toggle_Vida Infinita (Via Itens) (15/02/2026)"),
+            OBFUSCATE("11_Toggle_Recursos Infinitos (15/02/2026)"),
+            OBFUSCATE("12_Button_Adicionar Todas as Partes de Armas (15/02/2026)"),
+            OBFUSCATE("13_Button_Adicionar Todas as Peles (15/02/2026)"),
+            OBFUSCATE("14_Button_Adicionar 10 Whisky (15/02/2026)"),
 
             // Novas funcionalidades
             OBFUSCATE("Category_Controle do Jogador"),
-            OBFUSCATE("15_Button_Colocar no Cavalo"),
-            OBFUSCATE("16_Button_Remover do Cavalo"),
-            OBFUSCATE("17_Toggle_Recarga Instantânea"),
-            OBFUSCATE("18_Toggle_Hack de Velocidade"),
-            OBFUSCATE("19_SeekBar_Multiplicador de Velocidade_1_10"),
+            OBFUSCATE("15_Button_Colocar no Cavalo (15/02/2026)"),
+            OBFUSCATE("16_Button_Remover do Cavalo (15/02/2026)"),
+            OBFUSCATE("17_Toggle_Recarga Instantânea (15/02/2026)"),
+            OBFUSCATE("18_Toggle_Hack de Velocidade (15/02/2026)"),
+            OBFUSCATE("19_SeekBar_Multiplicador de Velocidade (15/02/2026)_1_10"),
 
             // Sistema de mira
             OBFUSCATE("Category_Sistema de Mira"),
-            OBFUSCATE("20_Toggle_Auto-Aim"),
-            OBFUSCATE("21_Toggle_AimBot V3 (Funções Reais)"),
-            OBFUSCATE("22_Toggle_Sempre Headshot"),
-            OBFUSCATE("23_Button_Limpar Alvos de Mira"),
+            OBFUSCATE("20_Toggle_Auto-Aim (15/02/2026)"),
+            OBFUSCATE("21_Toggle_AimBot V3 (Funções Reais) (15/02/2026)"),
+            OBFUSCATE("35_Toggle_AimBot Agressivo (15/02/2026)"),
+            OBFUSCATE("22_Toggle_Sempre Headshot (15/02/2026)"),
+            OBFUSCATE("23_Button_Limpar Alvos de Mira (15/02/2026)"),
 
             // Sistema Policial
             OBFUSCATE("Category_Sistema Policial"),
-            OBFUSCATE("24_Button_Gerar Policiais"),
-            OBFUSCATE("25_Button_Ocultar Todos os Policiais"),
-            OBFUSCATE("26_Button_Mostrar Todos os Policiais"),
-            OBFUSCATE("27_Button_Obter Número Max de Policiais"),
-            OBFUSCATE("28_Button_Obter Posição de Spawn da Polícia"),
+            OBFUSCATE("24_Button_Gerar Policiais (15/02/2026)"),
+            OBFUSCATE("25_Button_Ocultar Todos os Policiais (15/02/2026)"),
+            OBFUSCATE("26_Button_Mostrar Todos os Policiais (15/02/2026)"),
+            OBFUSCATE("27_Button_Obter Número Max de Policiais (15/02/2026)"),
+            OBFUSCATE("28_Button_Obter Posição de Spawn da Polícia (15/02/2026)"),
             
             // NPCs Especiais
             OBFUSCATE("Category_NPCs da Lei"),
-            OBFUSCATE("29_Button_Obter Instância do Xerife"),
-            OBFUSCATE("30_Button_Obter Instância do Caçador"),
-            OBFUSCATE("31_Button_Obter Dados de NPC Inimigo"),
+            OBFUSCATE("29_Button_Obter Instância do Xerife (15/02/2026)"),
+            OBFUSCATE("30_Button_Obter Instância do Caçador (15/02/2026)"),
+            OBFUSCATE("31_Button_Obter Dados de NPC Inimigo (15/02/2026)"),
+
+            // Modo voo (experimental)
+            OBFUSCATE("Category_Modo Voo"),
+            OBFUSCATE("32_Toggle_Modo Voo (Experimental) (15/02/2026)"),
+            OBFUSCATE("33_SeekBar_Velocidade Vertical_1_20"),
+            OBFUSCATE("34_SeekBar_Ganho de Altura_1_50"),
+
+            // Visual do jogo
+            OBFUSCATE("Category_Visual do Jogo"),
+            OBFUSCATE("36_Button_Criar Mission Hints Visuais (08/03/2026)"),
+            OBFUSCATE("37_Button_Remover Mission Hints Visuais (08/03/2026)"),
+            OBFUSCATE("38_Button_Mostrar Marcador no Alvo Atual (08/03/2026)"),
+            OBFUSCATE("39_Button_Ocultar Marcador do Alvo (08/03/2026)"),
+            OBFUSCATE("40_Toggle_ESP Completo (Barras de Vida) (08/03/2026)"),
+            OBFUSCATE("41_Button_Atualizar ESP Agora (08/03/2026)"),
+            OBFUSCATE("42_Button_Obter Todas as Entidades (08/03/2026)"),
+            OBFUSCATE("43_Toggle_Auto Kill Seguro (08/03/2026)"),
+            OBFUSCATE("44_Button_Kill All Agora (08/03/2026)"),
     };
 
     int Total_Feature = (sizeof features / sizeof features[0]);
@@ -1597,6 +1796,14 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
                 __android_log_print(ANDROID_LOG_INFO, "MOD_AIMBOT", "AimBot V3 desativado");
             }
             break;
+        case 35: // AimBot Agressivo
+            aimBotAggressive = boolean;
+            if (boolean) {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AIMBOT", "⚡ AimBot Agressivo ativado - ciclos extras de aquisição de alvo");
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AIMBOT", "AimBot Agressivo desativado");
+            }
+            break;
         case 22: // Sempre Headshot
             alwaysHeadshot = boolean;
             if (boolean) {
@@ -1606,34 +1813,35 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             }
             break;
         case 23: // Limpar alvos de mira
-            // Limpa todos os alvos atuais e força atualização
             __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Limpando todos os alvos de mira...");
-            // Esta funcionalidade é segura pois apenas limpa alvos
+            {
+                void* myCtrlPlayer = GetMyCtrlPlayerInstance();
+                if (myCtrlPlayer) {
+                    ForceAimRefresh(myCtrlPlayer);
+                    __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Alvos de mira limpos com sucesso");
+                } else {
+                    __android_log_print(ANDROID_LOG_WARN, "MOD_AIM", "MyCtrlPlayer indisponivel para limpar a mira");
+                }
+            }
             break;
             
         // ========== SISTEMA POLICIAL ==========
         case 24: // Gerar policiais
             {
-                void* missionCtrl = GetEnemyPosCtrlInstance(); // Usar como ctrl temporário
-                if (missionCtrl) {
-                    GeneratePolice(missionCtrl);
-                }
+                pendingGeneratePolice = true;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "GeneratePolice agendado (execução segura no hook)");
             }
             break;
         case 25: // Ocultar todos os policiais
             {
-                void* missionCtrl = GetEnemyPosCtrlInstance();
-                if (missionCtrl) {
-                    HideAllPolice(missionCtrl);
-                }
+                pendingHidePolice = true;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "HideAllPolice agendado (execução segura no hook)");
             }
             break;
         case 26: // Mostrar todos os policiais
             {
-                void* missionCtrl = GetEnemyPosCtrlInstance();
-                if (missionCtrl) {
-                    ShowAllPolice(missionCtrl);
-                }
+                pendingShowPolice = true;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "ShowAllPolice agendado (execução segura no hook)");
             }
             break;
         case 27: // Obter número máximo de policiais
@@ -1669,6 +1877,96 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             {
                 void* npcData = GetNPCenemyOriData(1); // ID padrão 1
                 // Dados do NPC obtidos
+            }
+            break;
+        case 32: // Modo voo experimental
+            flyMode = boolean;
+            if (boolean) {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Modo voo experimental ativado");
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Modo voo experimental desativado");
+            }
+            SetFlyRuntimeState(flyMode);
+            break;
+        case 33: // Velocidade vertical
+            if (value >= 1 && value <= 20) {
+                flyVerticalSpeed = (float)value;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Velocidade vertical ajustada para: %.1f", flyVerticalSpeed);
+                ApplyFlyPositionStep(); // efeito imediato ao mover slider
+            }
+            break;
+        case 34: // Ganho de altura por tick
+            if (value >= 1 && value <= 50) {
+                flyHeightStep = (float)value / 10.0f;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Ganho de altura ajustado para: %.2f", flyHeightStep);
+                ApplyFlyPositionStep(); // efeito imediato ao mover slider
+            }
+            break;
+        case 36: // Criar Mission Hints Visuais
+            TurnOnSceneMissionHints();
+            CreateMissionHints();
+            pendingCreateMissionHints = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "MissionHints visuais acionados");
+            break;
+        case 37: // Remover Mission Hints Visuais
+            TurnOffSceneMissionHints();
+            DestroyMissionHints();
+            pendingDestroyMissionHints = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "MissionHints visuais desativados");
+            break;
+        case 38: // Mostrar Marcador no Alvo Atual
+            ShowTargetMarkerOnCurrentTarget();
+            break;
+        case 39: // Ocultar Marcador do Alvo
+            HideTargetMarker();
+            break;
+        case 40: // ESP Completo
+            if (boolean) {
+                if (CanEnableCompleteESP()) {
+                    completeEsp = true;
+                    pendingEspRefresh = true;
+                    __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP completo ativado");
+                } else {
+                    completeEsp = false;
+                    __android_log_print(ANDROID_LOG_WARN, "MOD_ESP", "ESP bloqueado: UI ou jogo ainda nao estao prontos");
+                }
+            } else {
+                completeEsp = false;
+                pendingEspClear = true;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP completo desativado");
+            }
+            break;
+        case 41: // Atualizar ESP Agora
+            if (CanEnableCompleteESP()) {
+                pendingEspRefresh = true;
+            } else {
+                __android_log_print(ANDROID_LOG_WARN, "MOD_ESP", "Atualizacao manual bloqueada: estado do jogo invalido");
+            }
+            break;
+        case 42: // Obter todas as entidades
+            LogTrackedEntities();
+            break;
+        case 43: // Auto Kill Seguro
+            if (boolean) {
+                if (CanRunAutoKill()) {
+                    autoKill = true;
+                    pendingAutoKillBurst = true;
+                    __android_log_print(ANDROID_LOG_INFO, "MOD_AUTOKILL", "Auto Kill seguro ativado");
+                } else {
+                    autoKill = false;
+                    __android_log_print(ANDROID_LOG_WARN, "MOD_AUTOKILL", "Auto Kill bloqueado: contexto de jogo invalido");
+                }
+            } else {
+                autoKill = false;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AUTOKILL", "Auto Kill seguro desativado");
+            }
+            break;
+        case 44: // Kill All Agora
+            if (CanRunAutoKill()) {
+                pendingAutoKillBurst = true;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AUTOKILL", "Kill All agendado");
+            } else {
+                __android_log_print(ANDROID_LOG_WARN, "MOD_AUTOKILL", "Kill All bloqueado: contexto de jogo invalido");
             }
             break;
     }
@@ -1755,4 +2053,619 @@ JNI_OnLoad(JavaVM *vm, void *reserved) {
     if (RegisterMain(env) != 0)
         return JNI_ERR;
     return JNI_VERSION_1_6;
+}
+
+/**
+ * Obtém instância do controlador de missões (MissionCtrl)
+ * @return Ponteiro para MissionCtrl ou nullptr
+ */
+void* GetMissionCtrlInstance() {
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x25A1AC); // MissionCtrl.GetInstance()
+        if (baseAddress == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_POLICE", "Erro: Endereço inválido para MissionCtrl.GetInstance");
+            return nullptr;
+        }
+
+        auto getMissionCtrlInstance = reinterpret_cast<MissionCtrlGetInstanceFunc>(baseAddress);
+        void* missionCtrl = getMissionCtrlInstance(nullptr);
+
+        if (missionCtrl) {
+            __android_log_print(ANDROID_LOG_DEBUG, "MOD_POLICE", "MissionCtrl obtido com sucesso: %p", missionCtrl);
+        }
+
+        return missionCtrl;
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_POLICE", "Exceção ao obter MissionCtrl");
+        return nullptr;
+    }
+}
+
+void* GetSceneInOutPosCtrlInstance() {
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x324A30); // SceneInOutPosCtrl.GetInstance()
+        if (baseAddress == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Erro: Endereço inválido para SceneInOutPosCtrl.GetInstance");
+            return nullptr;
+        }
+
+        auto getInstance = reinterpret_cast<GetSceneInOutPosCtrlInstanceFunc>(baseAddress);
+        return getInstance(nullptr);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Exceção ao obter SceneInOutPosCtrl");
+        return nullptr;
+    }
+}
+
+void* GetGunParticalEffectsCtrlInstance() {
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x251E0C); // GunParticalEffectsCtrl.GetInstance()
+        if (baseAddress == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Erro: Endereço inválido para GunParticalEffectsCtrl.GetInstance");
+            return nullptr;
+        }
+
+        auto getInstance = reinterpret_cast<GetGunParticalEffectsCtrlInstanceFunc>(baseAddress);
+        return getInstance(nullptr);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Exceção ao obter GunParticalEffectsCtrl");
+        return nullptr;
+    }
+}
+
+static int GetCurrentGameSceneValue() {
+    void* gameCtrl = GetGameCtrlInstance();
+    if (!gameCtrl) return (int)GameScene_NoviceVillage;
+
+    try {
+        int sceneValue = *reinterpret_cast<int*>(reinterpret_cast<char*>(gameCtrl) + 0x40); // GameCtrl.gameScene
+        if (sceneValue < (int)GameScene_FirstLoading || sceneValue > (int)GameScene_ForMinYUI) {
+            return (int)GameScene_NoviceVillage;
+        }
+        return sceneValue;
+    } catch (...) {
+        return (int)GameScene_NoviceVillage;
+    }
+}
+
+void CreateMissionHints() {
+    void* sceneCtrl = GetSceneInOutPosCtrlInstance();
+    if (!sceneCtrl) return;
+
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x324A94); // SceneInOutPosCtrl.CreateMissionHints()
+        if (baseAddress == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Erro: Endereço inválido para CreateMissionHints");
+            return;
+        }
+
+        auto createMissionHints = reinterpret_cast<CreateMissionHintsFunc>(baseAddress);
+        int gameScene = GetCurrentGameSceneValue();
+        createMissionHints(sceneCtrl, gameScene, (int)MissionUnlock_Main, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "MissionHints criados: scene=%d", gameScene);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Exceção em CreateMissionHints");
+    }
+}
+
+void DestroyMissionHints() {
+    void* sceneCtrl = GetSceneInOutPosCtrlInstance();
+    if (!sceneCtrl) return;
+
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x3252A0); // SceneInOutPosCtrl.DestroyMissionHints()
+        if (baseAddress == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Erro: Endereço inválido para DestroyMissionHints");
+            return;
+        }
+
+        auto destroyMissionHints = reinterpret_cast<DestroyMissionHintsFunc>(baseAddress);
+        destroyMissionHints(sceneCtrl, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "MissionHints removidos");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Exceção em DestroyMissionHints");
+    }
+}
+
+void TurnOnSceneMissionHints() {
+    void* effectCtrl = GetGunParticalEffectsCtrlInstance();
+    if (!effectCtrl) return;
+
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x253E4C); // GunParticalEffectsCtrl.TurnOnSceneMissionHints()
+        if (baseAddress == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Erro: Endereço inválido para TurnOnSceneMissionHints");
+            return;
+        }
+
+        auto toggleHints = reinterpret_cast<ToggleSceneMissionHintsFunc>(baseAddress);
+        toggleHints(effectCtrl, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "TurnOnSceneMissionHints executado");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Exceção em TurnOnSceneMissionHints");
+    }
+}
+
+void TurnOffSceneMissionHints() {
+    void* effectCtrl = GetGunParticalEffectsCtrlInstance();
+    if (!effectCtrl) return;
+
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x253E50); // GunParticalEffectsCtrl.TurnOffSceneMissionHints()
+        if (baseAddress == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Erro: Endereço inválido para TurnOffSceneMissionHints");
+            return;
+        }
+
+        auto toggleHints = reinterpret_cast<ToggleSceneMissionHintsFunc>(baseAddress);
+        toggleHints(effectCtrl, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "TurnOffSceneMissionHints executado");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Exceção em TurnOffSceneMissionHints");
+    }
+}
+
+void* GetUIManageInstance() {
+    try {
+        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x3FC5F0); // UI_Manage.GetInstance()
+        if (baseAddress == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Erro: Endereço inválido para UI_Manage.GetInstance");
+            return nullptr;
+        }
+
+        auto getInstance = reinterpret_cast<GetUIManageInstanceFunc>(baseAddress);
+        return getInstance(nullptr);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Exceção ao obter UI_Manage");
+        return nullptr;
+    }
+}
+
+void* GetPlayingUICreatorInstance() {
+    void* uiManage = GetUIManageInstance();
+    if (!uiManage) return nullptr;
+
+    try {
+        // dump.cs: UI_Manage.uiPlayingUICreator // 0x24
+        void** creatorPtr = reinterpret_cast<void**>(reinterpret_cast<char*>(uiManage) + 0x24);
+        if (!creatorPtr) return nullptr;
+        void* creator = *creatorPtr;
+        if (!creator || (uintptr_t)creator < 0x10000000) return nullptr;
+        return creator;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+static bool IsProbablyValidPtr(void* ptr) {
+    return ptr && (uintptr_t)ptr >= 0x10000000;
+}
+
+void* GetPlayingUIBloodFactoryInstance() {
+    void* uiManage = GetUIManageInstance();
+    if (!uiManage) return nullptr;
+
+    try {
+        // dump.cs: UI_Manage.uiCamera // 0xC
+        void* uiCamera = *reinterpret_cast<void**>(reinterpret_cast<char*>(uiManage) + 0xC);
+        if (!IsProbablyValidPtr(uiCamera)) return nullptr;
+
+        // dump.cs: UI_Manage.uiPlayingUIBloods // 0x14
+        void** factoryPtr = reinterpret_cast<void**>(reinterpret_cast<char*>(uiManage) + 0x14);
+        if (!factoryPtr) return nullptr;
+        void* factory = *factoryPtr;
+        if (!IsProbablyValidPtr(factory)) return nullptr;
+
+        // dump.cs: UI_PlayingUI_BloodFactory.BloodPrefab // 0xC
+        void* bloodPrefab = *reinterpret_cast<void**>(reinterpret_cast<char*>(factory) + 0xC);
+        return IsProbablyValidPtr(bloodPrefab) ? factory : nullptr;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+bool CanEnableCompleteESP() {
+    if (!IsProbablyValidPtr(GetGameCtrlInstance())) return false;
+    if (!IsProbablyValidPtr(GetMyPlayerInstance())) return false;
+    if (!IsProbablyValidPtr(GetPlayingUIBloodFactoryInstance())) return false;
+    return true;
+}
+
+bool CanRunAutoKill() {
+    if (!IsProbablyValidPtr(GetGameCtrlInstance())) return false;
+    if (!IsProbablyValidPtr(GetMyCtrlPlayerInstance())) return false;
+    if (getAbsoluteAddress(targetLibName, 0x2F1D7C) == 0) return false; // GameCtrl.GetEnermyActiveList()
+    if (getAbsoluteAddress(targetLibName, 0x31B830) == 0) return false; // PlayerBase.BeHit()
+
+    void* enemies[4] = {};
+    return CollectActiveEnemyBases(enemies, 4) > 0;
+}
+
+static int GetEntityManagerCount() {
+    try {
+        uintptr_t addrGetInstance = getAbsoluteAddress(targetLibName, 0x2E8CF0); // EntityManager.GetInstance()
+        if (addrGetInstance == 0) return 0;
+
+        auto getEntityManager = reinterpret_cast<GetEntityManagerInstanceFunc>(addrGetInstance);
+        void* entityManager = getEntityManager(nullptr);
+        if (!IsProbablyValidPtr(entityManager)) return 0;
+
+        // dump.cs: EntityManager.m_EntityMap // 0x8
+        auto* entityMap = *reinterpret_cast<Il2CppDictionary<int, void*>**>(reinterpret_cast<char*>(entityManager) + 0x8);
+        if (!entityMap) return 0;
+
+        int count = entityMap->count;
+        return count > 0 ? count : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+static void AppendUniquePlayer(void** players, int& count, int maxPlayers, void* player) {
+    if (!IsProbablyValidPtr(player) || count >= maxPlayers) return;
+    for (int i = 0; i < count; ++i) {
+        if (players[i] == player) return;
+    }
+    players[count++] = player;
+}
+
+static void CollectPlayersFromList(void* listPtr, void** players, int& count, int maxPlayers) {
+    if (!IsProbablyValidPtr(listPtr)) return;
+
+    auto* list = reinterpret_cast<Il2CppList<void*>*>(listPtr);
+    if (!list || !list->items) return;
+
+    int size = list->size;
+    if (size <= 0 || size > 512) return;
+
+    uint32_t maxLength = list->items->max_length;
+    int limit = size < static_cast<int>(maxLength) ? size : static_cast<int>(maxLength);
+    for (int i = 0; i < limit; ++i) {
+        AppendUniquePlayer(players, count, maxPlayers, list->items->items[i]);
+    }
+}
+
+static void CollectPlayersFromDictionary(void* dictPtr, void** players, int& count, int maxPlayers) {
+    if (!IsProbablyValidPtr(dictPtr)) return;
+
+    auto* dict = reinterpret_cast<Il2CppDictionary<int, void*>*>(dictPtr);
+    if (!dict || !dict->valueSlots) return;
+
+    int touchedSlots = dict->touchedSlots;
+    if (touchedSlots <= 0 || touchedSlots > 1024) return;
+
+    uint32_t maxLength = dict->valueSlots->max_length;
+    int limit = touchedSlots < static_cast<int>(maxLength) ? touchedSlots : static_cast<int>(maxLength);
+    for (int i = 0; i < limit; ++i) {
+        AppendUniquePlayer(players, count, maxPlayers, dict->valueSlots->items[i]);
+    }
+}
+
+static int CollectTrackedPlayers(void** outPlayers, int maxPlayers) {
+    int count = 0;
+
+    try {
+        void* gameCtrl = GetGameCtrlInstance();
+        if (IsProbablyValidPtr(gameCtrl)) {
+            uintptr_t addrGetEnemyActiveList = getAbsoluteAddress(targetLibName, 0x2F1D7C); // GameCtrl.GetEnermyActiveList()
+            if (addrGetEnemyActiveList != 0) {
+                auto getEnemyActiveList = reinterpret_cast<GameCtrlGetEnemyActiveListFunc>(addrGetEnemyActiveList);
+                void* enemyList = getEnemyActiveList(gameCtrl, nullptr);
+                if (IsProbablyValidPtr(enemyList)) {
+                    auto* list = reinterpret_cast<Il2CppList<void*>*>(enemyList); // List<PlayerBase>
+                    if (list && list->items) {
+                        int size = list->size;
+                        if (size > 0 && size <= 512) {
+                            uint32_t maxLength = list->items->max_length;
+                            int limit = size < static_cast<int>(maxLength) ? size : static_cast<int>(maxLength);
+                            for (int i = 0; i < limit; ++i) {
+                                void* playerBase = list->items->items[i];
+                                if (!IsProbablyValidPtr(playerBase)) continue;
+                                // dump.cs: PlayerBase.m_dPlayer // 0xC
+                                void* player = *reinterpret_cast<void**>(reinterpret_cast<char*>(playerBase) + 0xC);
+                                AppendUniquePlayer(outPlayers, count, maxPlayers, player);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // GameCtrl.myHorse também é uma entidade visual válida em alguns estados.
+        }
+
+        void* missionCtrl = GetMissionCtrlInstance();
+        if (IsProbablyValidPtr(missionCtrl)) {
+            CollectPlayersFromList(*reinterpret_cast<void**>(reinterpret_cast<char*>(missionCtrl) + 0x38), outPlayers, count, maxPlayers); // nonTaskPerNpcPlayers
+            CollectPlayersFromList(*reinterpret_cast<void**>(reinterpret_cast<char*>(missionCtrl) + 0x3C), outPlayers, count, maxPlayers); // nonTaskNonPerNpcPlayers
+            CollectPlayersFromList(*reinterpret_cast<void**>(reinterpret_cast<char*>(missionCtrl) + 0x40), outPlayers, count, maxPlayers); // noneMissionAnimalPlayers
+            CollectPlayersFromList(*reinterpret_cast<void**>(reinterpret_cast<char*>(missionCtrl) + 0x44), outPlayers, count, maxPlayers); // policePlayers
+            AppendUniquePlayer(outPlayers, count, maxPlayers, *reinterpret_cast<void**>(reinterpret_cast<char*>(missionCtrl) + 0x5C)); // TutorialEnemyPlayer
+        }
+    } catch (...) {
+    }
+
+    return count;
+}
+
+int CollectActiveEnemyBases(void** outEnemies, int maxEnemies) {
+    if (!outEnemies || maxEnemies <= 0) return 0;
+
+    try {
+        void* gameCtrl = GetGameCtrlInstance();
+        if (!IsProbablyValidPtr(gameCtrl)) return 0;
+
+        uintptr_t addrGetEnemyActiveList = getAbsoluteAddress(targetLibName, 0x2F1D7C); // GameCtrl.GetEnermyActiveList()
+        if (addrGetEnemyActiveList == 0) return 0;
+
+        auto getEnemyActiveList = reinterpret_cast<GameCtrlGetEnemyActiveListFunc>(addrGetEnemyActiveList);
+        void* enemyList = getEnemyActiveList(gameCtrl, nullptr);
+        if (!IsProbablyValidPtr(enemyList)) return 0;
+
+        auto* list = reinterpret_cast<Il2CppList<void*>*>(enemyList); // List<PlayerBase>
+        if (!list || !list->items) return 0;
+
+        int size = list->size;
+        if (size <= 0 || size > 512) return 0;
+
+        uint32_t maxLength = list->items->max_length;
+        int limit = size < static_cast<int>(maxLength) ? size : static_cast<int>(maxLength);
+        int count = 0;
+        for (int i = 0; i < limit && count < maxEnemies; ++i) {
+            void* enemyBase = list->items->items[i];
+            if (!IsProbablyValidPtr(enemyBase)) continue;
+            outEnemies[count++] = enemyBase;
+        }
+        return count;
+    } catch (...) {
+        return 0;
+    }
+}
+
+void RunAutoKillOnce() {
+    if (!CanRunAutoKill()) return;
+
+    try {
+        uintptr_t addrBeHit = getAbsoluteAddress(targetLibName, 0x31B830); // PlayerBase.BeHit()
+        uintptr_t addrKilledAI = getAbsoluteAddress(targetLibName, 0x2812C4); // MissionCtrl.KilledAI(Player)
+        uintptr_t addrClearEnemy = getAbsoluteAddress(targetLibName, 0x280390); // MissionCtrl.ClearEnemy(Player)
+        uintptr_t addrMissionContainEnemy = getAbsoluteAddress(targetLibName, 0x480EA0); // MissionEntity.ContainEnemy(PlayerBase)
+        uintptr_t addrMissionDeleteEnemy = getAbsoluteAddress(targetLibName, 0x4811A0); // MissionEntity.DeleteEnemy(PlayerBase)
+        uintptr_t addrFactoryContainPlayerBase = getAbsoluteAddress(targetLibName, 0x2E4A34); // EnemyFactory.ContainPlayerBase(PlayerBase)
+        uintptr_t addrFactoryDeletePlayerBase = getAbsoluteAddress(targetLibName, 0x2E4AB4); // EnemyFactory.DeletePlayerBase(PlayerBase)
+        uintptr_t addrEnemyGC = getAbsoluteAddress(targetLibName, 0x2E791C); // EnermyGC.EnemyGC(Player)
+        if (addrBeHit == 0) return;
+
+        auto beHit = reinterpret_cast<PlayerBaseBeHitFunc>(addrBeHit);
+        auto killedAI = reinterpret_cast<MissionCtrlPlayerActionFunc>(addrKilledAI);
+        auto clearEnemy = reinterpret_cast<MissionCtrlPlayerActionFunc>(addrClearEnemy);
+        auto missionContainEnemy = reinterpret_cast<MissionEntityContainEnemyFunc>(addrMissionContainEnemy);
+        auto missionDeleteEnemy = reinterpret_cast<MissionEntityDeleteEnemyFunc>(addrMissionDeleteEnemy);
+        auto factoryContainPlayerBase = reinterpret_cast<EnemyFactoryContainPlayerBaseFunc>(addrFactoryContainPlayerBase);
+        auto factoryDeletePlayerBase = reinterpret_cast<EnemyFactoryDeletePlayerBaseFunc>(addrFactoryDeletePlayerBase);
+        auto enemyGC = reinterpret_cast<EnemyGCFunc>(addrEnemyGC);
+
+        void* gameCtrl = GetGameCtrlInstance();
+        if (!IsProbablyValidPtr(gameCtrl)) return;
+
+        void* enermyGC = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x24);      // GameCtrl.m_pEnermyGC
+        void* enemyFactory = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x28);   // GameCtrl.m_pEnemyFactory
+        void* missionCtrl = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x2C);    // GameCtrl.m_MissionCtrl
+        void* missionEntity = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x30);  // GameCtrl.m_MissionEntity
+
+        void* enemies[128] = {};
+        int enemyCount = CollectActiveEnemyBases(enemies, 128);
+        if (enemyCount <= 0) return;
+
+        int touched = 0;
+        int removed = 0;
+        for (int i = 0; i < enemyCount; ++i) {
+            void* enemyBase = enemies[i];
+            if (!IsProbablyValidPtr(enemyBase)) continue;
+
+            void* player = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0xC); // PlayerBase.m_dPlayer
+            void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0x14); // PlayerBase.m_dPlayerBaseData
+            if (!IsProbablyValidPtr(baseData)) continue;
+
+            void* property = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0x8); // PlayerBaseData.m_dProperty
+            if (!IsProbablyValidPtr(property)) continue;
+
+            int currentBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x14); // PlayerBaseProperty.m_dCurrentBlood
+            int maxBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x10);     // PlayerBaseProperty.m_dMaxBlood
+            if (currentBlood <= 0 || maxBlood <= 0) continue;
+
+            // dump.cs: ColliderBodyParts.Head = 0
+            int lethalDamage = currentBlood + maxBlood + 5000;
+            beHit(enemyBase, lethalDamage, 0, nullptr);
+            touched++;
+
+            if (IsProbablyValidPtr(missionCtrl) && IsProbablyValidPtr(player)) {
+                if (addrKilledAI != 0) {
+                    killedAI(missionCtrl, player, nullptr);
+                }
+                if (addrClearEnemy != 0) {
+                    clearEnemy(missionCtrl, player, nullptr);
+                }
+            }
+
+            if (IsProbablyValidPtr(missionEntity) && addrMissionContainEnemy != 0 && addrMissionDeleteEnemy != 0) {
+                if (missionContainEnemy(missionEntity, enemyBase, nullptr)) {
+                    missionDeleteEnemy(missionEntity, enemyBase, nullptr);
+                    removed++;
+                }
+            }
+
+            if (IsProbablyValidPtr(enemyFactory) && addrFactoryContainPlayerBase != 0 && addrFactoryDeletePlayerBase != 0) {
+                if (factoryContainPlayerBase(enemyFactory, enemyBase, nullptr)) {
+                    factoryDeletePlayerBase(enemyFactory, enemyBase, nullptr);
+                }
+            }
+
+            if (IsProbablyValidPtr(enermyGC) && IsProbablyValidPtr(player) && addrEnemyGC != 0) {
+                enemyGC(enermyGC, player, nullptr);
+            }
+        }
+
+        __android_log_print(ANDROID_LOG_INFO, "MOD_AUTOKILL", "AutoKill tocou %d inimigos, removeu %d", touched, removed);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_AUTOKILL", "Falha protegida em RunAutoKillOnce");
+    }
+}
+
+static bool GetPlayerBloodInfo(void* player, int& currentBlood, int& maxBlood) {
+    if (!IsProbablyValidPtr(player)) return false;
+
+    try {
+        // dump.cs: Player.m_player -> 0xC
+        void* playerBase = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0xC);
+        if (!IsProbablyValidPtr(playerBase)) return false;
+
+        // dump.cs: PlayerBase.m_dPlayerBaseData -> 0x14
+        void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(playerBase) + 0x14);
+        if (!IsProbablyValidPtr(baseData)) return false;
+
+        // dump.cs: PlayerBaseData.m_dProperty -> 0x8
+        void* property = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0x8);
+        if (!IsProbablyValidPtr(property)) return false;
+
+        // dump.cs: PlayerBaseProperty.m_dMaxBlood -> 0x10, m_dCurrentBlood -> 0x14
+        maxBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x10);
+        currentBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x14);
+        return maxBlood > 0 && currentBlood >= 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+void RefreshCompleteESP() {
+    try {
+        if (!CanEnableCompleteESP()) return;
+
+        void* bloodFactory = GetPlayingUIBloodFactoryInstance();
+        if (!IsProbablyValidPtr(bloodFactory)) return;
+
+        uintptr_t addrGenerateEnemyBlood = getAbsoluteAddress(targetLibName, 0x3C67D8);
+        uintptr_t addrDestroyAllBlood = getAbsoluteAddress(targetLibName, 0x3C6F60);
+        uintptr_t addrSetCurrentBlood = getAbsoluteAddress(targetLibName, 0x3C70EC);
+        uintptr_t addrSetCurrentBloodEnable = getAbsoluteAddress(targetLibName, 0x3C7354);
+        if (addrGenerateEnemyBlood == 0 || addrDestroyAllBlood == 0 || addrSetCurrentBlood == 0 || addrSetCurrentBloodEnable == 0) return;
+
+        auto generateEnemyBlood = reinterpret_cast<GenerateEnemyBloodFunc>(addrGenerateEnemyBlood);
+        auto destroyAllBlood = reinterpret_cast<DestroyAllBloodFunc>(addrDestroyAllBlood);
+        auto setCurrentBlood = reinterpret_cast<SetCurrentBloodValueFunc>(addrSetCurrentBlood);
+        auto setCurrentBloodEnable = reinterpret_cast<SetCurrentBloodEnableFunc>(addrSetCurrentBloodEnable);
+
+        destroyAllBlood(bloodFactory, nullptr);
+
+        void* players[128] = {};
+        int playerCount = CollectTrackedPlayers(players, 128);
+        if (playerCount <= 0) return;
+
+        void* myPlayer = GetMyPlayerInstance();
+        int applied = 0;
+
+        for (int i = 0; i < playerCount; ++i) {
+            void* player = players[i];
+            if (!IsProbablyValidPtr(player) || player == myPlayer) continue;
+
+            void* target = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x3C); // Player.Head
+            if (!IsProbablyValidPtr(target)) {
+                target = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x24); // Player.Root
+            }
+            if (!IsProbablyValidPtr(target)) continue;
+
+            int currentBlood = 0;
+            int maxBlood = 0;
+            if (!GetPlayerBloodInfo(player, currentBlood, maxBlood)) continue;
+            if (maxBlood <= 0 || currentBlood < 0 || currentBlood > maxBlood * 4) continue;
+
+            generateEnemyBlood(bloodFactory, target, nullptr);
+            setCurrentBlood(bloodFactory, target, currentBlood, maxBlood, nullptr);
+            setCurrentBloodEnable(bloodFactory, target, true, nullptr);
+            applied++;
+        }
+
+        __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP atualizado em %d entidades", applied);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_ESP", "Falha protegida em RefreshCompleteESP");
+    }
+}
+
+void ClearCompleteESP() {
+    void* bloodFactory = GetPlayingUIBloodFactoryInstance();
+    if (!IsProbablyValidPtr(bloodFactory)) return;
+
+    try {
+        uintptr_t addrDestroyAllBlood = getAbsoluteAddress(targetLibName, 0x3C6F60); // UI_PlayingUI_BloodFactory.DestroyAllBlood()
+        if (addrDestroyAllBlood == 0) return;
+
+        auto destroyAllBlood = reinterpret_cast<DestroyAllBloodFunc>(addrDestroyAllBlood);
+        destroyAllBlood(bloodFactory, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP limpo");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_ESP", "Falha ao limpar ESP");
+    }
+}
+
+void LogTrackedEntities() {
+    void* players[256] = {};
+    int trackedPlayers = CollectTrackedPlayers(players, 256);
+    int entityManagerCount = GetEntityManagerCount();
+
+    __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
+                        "Entidades rastreadas: trackedPlayers=%d entityManager=%d",
+                        trackedPlayers, entityManagerCount);
+}
+
+void ShowTargetMarkerOnCurrentTarget() {
+    void* creator = GetPlayingUICreatorInstance();
+    void* myCtrlPlayer = GetMyCtrlPlayerInstance();
+    if (!creator || !myCtrlPlayer) {
+        __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "UI creator ou MyCtrlPlayer indisponivel");
+        return;
+    }
+
+    void* target = FindBestTarget(myCtrlPlayer);
+    if (!target) {
+        __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "Nenhum alvo atual encontrado para marcador");
+        return;
+    }
+
+    try {
+        uintptr_t addrShow = getAbsoluteAddress(targetLibName, 0x3C9864); // UI_PlayingUI_Creator.ShowAimFollowTagetUI()
+        uintptr_t addrSetTarget = getAbsoluteAddress(targetLibName, 0x3C9A34); // UI_PlayingUI_Creator.SetAimFollowTarget(Transform)
+        if (addrShow == 0 || addrSetTarget == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Endereço inválido para marcador de alvo");
+            return;
+        }
+
+        auto showMarker = reinterpret_cast<ShowAimFollowTargetUIFunc>(addrShow);
+        auto setMarkerTarget = reinterpret_cast<SetAimFollowTargetUIFunc>(addrSetTarget);
+        showMarker(creator, nullptr);
+        setMarkerTarget(creator, target, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "Marcador visual aplicado ao alvo atual");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Exceção ao mostrar marcador no alvo");
+    }
+}
+
+void HideTargetMarker() {
+    void* creator = GetPlayingUICreatorInstance();
+    if (!creator) {
+        __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "UI creator indisponivel para ocultar marcador");
+        return;
+    }
+
+    try {
+        uintptr_t addrHide = getAbsoluteAddress(targetLibName, 0x3C994C); // UI_PlayingUI_Creator.HideAimFollowTagetUI()
+        if (addrHide == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Endereço inválido para ocultar marcador");
+            return;
+        }
+
+        auto hideMarker = reinterpret_cast<HideAimFollowTargetUIFunc>(addrHide);
+        hideMarker(creator, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_VISUAL", "Marcador visual ocultado");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Exceção ao ocultar marcador");
+    }
 }

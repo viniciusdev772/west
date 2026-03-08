@@ -1,5 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
+set "STARTED_FROM_CMD=%COMSPEC%"
+set "KEEP_OPEN=1"
 
 echo ============================================
 echo  Build Script para Biblioteca Nativa
@@ -11,8 +13,7 @@ echo.
 if not exist "gradlew.bat" (
     echo ERRO: gradlew.bat nao encontrado no diretorio atual
     echo Certifique-se de estar executando este script na raiz do projeto
-    pause
-    exit /b 1
+    goto :end
 )
 
 :: Verificar se o gradle wrapper esta funcionando corretamente
@@ -32,8 +33,7 @@ if not exist "gradle\wrapper\gradle-wrapper.jar" (
         ) else (
             echo ERRO: Gradle nao encontrado globalmente
             echo Crie o arquivo fix-gradle-wrapper.cmd ou instale o Gradle
-            pause
-            exit /b 1
+            goto :end
         )
     )
 )
@@ -52,8 +52,7 @@ if "!WRAPPER_OK!"=="0" (
         call fix-gradle-wrapper.cmd
     ) else (
         echo ERRO: fix-gradle-wrapper.cmd nao encontrado para reparo automatico
-        pause
-        exit /b 1
+        goto :end
     )
 )
 
@@ -85,8 +84,7 @@ if "%JAVA_HOME%"=="" (
     if !ERRORLEVEL! neq 0 (
         echo ERRO: Java nao encontrado
         echo Instale o JDK 17+ ou configure JAVA_HOME corretamente
-        pause
-        exit /b 1
+        goto :end
     )
 ) else (
     set "PATH=%JAVA_HOME%\bin;%PATH%"
@@ -105,8 +103,7 @@ if "%ANDROID_HOME%"=="" (
     ) else (
         echo ERRO: Android SDK nao encontrado
         echo Por favor, defina a variavel ANDROID_HOME ou instale o Android Studio
-        pause
-        exit /b 1
+        goto :end
     )
 )
 
@@ -137,8 +134,7 @@ if %ERRORLEVEL% neq 0 (
     echo 1. Verifique se Java JDK 17+ esta instalado e JAVA_HOME configurado
     echo 2. Verifique se todas as dependencias estao satisfeitas
     echo 3. Execute: gradlew.bat clean :app:assembleDebug
-    pause
-    exit /b %ERRORLEVEL%
+    goto :end
 )
 
 echo.
@@ -158,11 +154,25 @@ if defined LATEST_SO (
     echo Mais recente: %LATEST_SO%
 ) else (
     echo Nenhuma biblioteca .so encontrada no diretorio app\build
+    goto :end
+)
+
+echo.
+echo Enviando biblioteca para API v11...
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\upload-native.ps1" -FilePath "%LATEST_SO%" -BuildType "Debug"
+
+if %ERRORLEVEL% neq 0 (
+    echo ERRO: Falha no upload da biblioteca para a API v11
+    goto :end
 )
 
 echo.
 echo A biblioteca nativa foi compilada com sucesso!
 if defined LATEST_SO echo Biblioteca .so mais recente: %LATEST_SO%
+echo Upload para API v11: concluido
 echo.
 
-pause
+:end
+echo.
+echo O script terminou. Esta janela permanecera aberta.
+cmd /k

@@ -176,11 +176,27 @@ if ($latestSo) {
     Write-Host "Modificado: $($latestSo.LastWriteTime)" -ForegroundColor Gray
 } else {
     Write-Host "Nenhuma biblioteca .so encontrada no diretório de build" -ForegroundColor Yellow
+    Read-Host "Pressione Enter para sair"
+    exit 1
+}
+
+try {
+    & ".\upload-native.ps1" -FilePath $latestSo.FullName -BuildType $buildType
+    if ($LASTEXITCODE -ne 0) {
+        throw "upload-native.ps1 retornou codigo $LASTEXITCODE"
+    }
+} catch {
+    Write-Host ""
+    Write-Host "ERRO: Falha no upload da biblioteca" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Read-Host "Pressione Enter para sair"
+    exit 1
 }
 
 Write-Host ""
 Write-Host "A biblioteca nativa foi compilada com sucesso!" -ForegroundColor Green
 if ($latestSo) { Write-Host "Biblioteca .so mais recente: $($latestSo.FullName)" -ForegroundColor White }
+Write-Host "Upload para API v11: concluido" -ForegroundColor White
 Write-Host ""
 
 # Mostrar opções de uso
