@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <cstdint>
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 #include <android/log.h>
 #include <dlfcn.h>
@@ -76,6 +77,8 @@ bool aimBot = false;                 // 🎯 AimBot Inteligente - caça inimigos
 bool aimBotAggressive = false;       // ⚡ Aimbot agressivo (mais tentativas por frame)
 bool alwaysHeadshot = false;         // 💀 Força todos os tiros como headshot
 bool flyMode = false;                // 🕊️ Modo voo experimental
+bool npcFlyMode = false;             // ☁️ Levita NPCs hostis usando o mesmo Player da dump
+bool npcWarMode = false;             // ⚔️ Faz NPCs hostis entrarem em conflito entre si
 bool completeEsp = false;            // 👁️ ESP completo com barras de vida
 bool autoKill = false;               // ☠️ Mata inimigos ativos com BeHit
 bool bulletTailEsp = false;          // 🔫 Desenha trilhas de tiro em NPCs armados
@@ -84,6 +87,8 @@ int sliderValue = 1, Moedas = 0, Gems = 0;
 float speedMultiplier = 1.0f;
 float flyVerticalSpeed = 5.0f;
 float flyHeightStep = 1.0f;
+float npcFlyLift = 1.2f;
+void* npcFlightTargetPlayer = nullptr;
 
 // Ações pendentes para execução em contexto de jogo
 volatile bool pendingGeneratePolice = false;
@@ -100,6 +105,10 @@ volatile bool pendingMiniMapEspRefresh = false;
 volatile bool pendingMiniMapEspClear = false;
 volatile bool pendingShowWordsTest = false;
 volatile bool pendingShowWordsCustom = false;
+volatile bool pendingChaosTime = false;
+volatile bool pendingChaosSpawn = false;
+volatile bool pendingChaosUI = false;
+volatile bool pendingChaosWeapon = false;
 char pendingCustomWordsText[256] = {0};
 
 // Estrutura para dados do jogador em tempo real
@@ -208,9 +217,32 @@ typedef Vector3 (*ReadCurrentPlayerPositionFunc)();
 typedef Vector3 (*PlayerGetPositionFunc)(void* thisPtr, void* method);
 typedef void (*PlayerSetPositionFunc)(void* thisPtr, Vector3 pos, void* method);
 typedef void (*PlayerSetNavMeshEnableFunc)(void* thisPtr, bool enable, void* method);
+typedef void (*PlayerSetNavMeshSpeedFunc)(void* thisPtr, float speed, void* method);
 typedef void (*PlayerSetCurrentVelocityFunc)(void* thisPtr, Vector3 velocity, void* method);
+typedef void (*PlayerTranslateWithSamplePosFunc)(void* thisPtr, Vector3 velocity, void* method);
+typedef Vector3 (*PlayerGetCurrentVelocityFunc)(void* thisPtr, void* method);
+typedef bool (*PlayerIsMovingFunc)(void* thisPtr, void* method);
+typedef Vector3 (*PlayerHeadingFunc)(void* thisPtr, void* method);
+typedef void (*PlayerRotateToCameraDirFunc)(void* thisPtr, void* method);
+typedef void (*PlayerSetRotationCameraDirFunc)(void* thisPtr, void* method);
+typedef void (*PlayerSetCurrentRotationFunc)(void* thisPtr, Vector3 velocity, void* method);
+typedef void (*PlayerRotateToDirFunc)(void* thisPtr, Vector3 dir, void* method);
+typedef void (*PlayerStopRotateFunc)(void* thisPtr, void* method);
 typedef Vector3 (*MyCtrlPlayerGetPositionFunc)(void* thisPtr, void* method);
 typedef void (*MyCtrlPlayerSetPositionFunc)(void* thisPtr, Vector3 pos, void* method);
+typedef Vector3 (*TransformGetPositionFunc)(void* thisPtr, void* method);
+typedef Vector3 (*CameraWorldToScreenPointFunc)(void* thisPtr, Vector3 pos, void* method);
+typedef int (*ScreenGetWidthFunc)();
+typedef int (*ScreenGetHeightFunc)();
+typedef void (*GameCtrlSetTimeScaleFunc)(float time, void* method);
+typedef void (*GameCtrlRecoverTimeScaleFunc)(void* method);
+typedef void (*GameCtrlChangedWeaponFunc)(void* thisPtr, int kindID, bool isGun, void* method);
+typedef void (*GameCtrlSetHorseParamFunc)(void* thisPtr, int horseID, void* method);
+typedef void (*GameCtrlChangeHorseFunc)(void* thisPtr, int horseID, void* method);
+typedef void (*MissionCtrlGenerateTutorialEnemyFunc)(void* thisPtr, void* method);
+typedef void (*MissionCtrlSimpleActionFunc)(void* thisPtr, void* method);
+typedef void (*ShowHeadshootUIFunc)(void* thisPtr, void* method);
+typedef void (*ShowMiniMapUIFunc)(void* thisPtr, void* method);
 
 // Tipos de função corrigidos
 typedef MyPlayerOriData* (*GetMyPlayerOriDataFunc)();
@@ -241,10 +273,13 @@ enum AnimalType {
     AnimalCowboy = 1,     // ❌ NUNCA MIRAR
     
     // Inimigos Humanos - PRIORIDADE MÉDIA
+    Sheriff = 18,         // ✅ Xerife
     BountyHunter = 25,    // ✅ Caçador de recompensas
     Robber = 26,          // ✅ Ladrão  
     Pro01 = 30,           // ✅ Profissional 1
     Pro02 = 31,           // ✅ Profissional 2
+    Bid01 = 32,           // ✅ NPC hostil tipo Bid 1
+    Bid02 = 33,           // ✅ NPC hostil tipo Bid 2
     
     // Zumbis - PRIORIDADE ALTA
     Zombies01 = 34,       // ✅ Zumbi tipo 1
@@ -397,6 +432,8 @@ void* GetBulletTailFactoryInstance();
 static bool IsProbablyValidPtr(void* ptr);
 static bool ResolvePlayerStartPos(void* myPlayer, Vector3& outStartPos);
 static bool IsBulletTailCompatibleEnemyBase(void* enemyBase, void** outPlayer);
+static bool PlayerContainsTransform(void* player, void* targetTransform);
+static bool GetPlayerBloodInfo(void* player, int& currentBlood, int& maxBlood);
 bool GenerateBulletTailForPlayer(void* factory, const Vector3& startPos, void* targetPlayer, bool isHit);
 int GenerateBulletTailForAllActiveEnemies();
 bool CanUseBulletTail();
@@ -408,11 +445,41 @@ void RefreshMiniMapEnemyEsp();
 void ClearMiniMapEnemyEsp();
 void ShowWordsHintText(const char* text, float showTime);
 void ProcessGameplayHints();
+void RunChaosTimeOnce();
+void RunChaosSpawnOnce();
+void RunChaosUIOnce();
+void RunChaosWeaponOnce();
+void RunNpcWarFrame();
 void* ResolveBestAggressiveAimTarget(void* myCtrlPlayer);
 void* GetGameCtrlInstance();
 void* GetMyPlayerInstance();
 bool GetPlayerWorldPosition(void* player, Vector3& outPos);
 static bool CanAttackTargetTransform(void* myCtrlPlayer, void* targetTransform);
+void* GetMainCameraInstance();
+bool GetTransformWorldPosition(void* transform, Vector3& outPos);
+bool WorldToScreen(const Vector3& worldPos, Vector3& outScreenPos);
+bool ProjectPlayerScreenAnchors(void* player, Vector3& outHeadScreen, Vector3& outRootScreen);
+void LogWorldToScreenSamples();
+void RefreshTargetMarkerESP();
+void ApplyFlyMovementFrame(void* myCtrlPlayer);
+void ApplyEnemyFlyMovementFrame();
+void SetEnemyFlightState(bool enabled);
+
+struct ScreenBox {
+    float left;
+    float top;
+    float right;
+    float bottom;
+};
+
+static bool TryBuildScreenBoxForPlayer(void* player, ScreenBox& outBox);
+static float Vector3LengthXZ(const Vector3& value);
+static Vector3 NormalizeXZ(const Vector3& value);
+static float ClampMagnitudeXZ(float value, float minValue, float maxValue);
+static bool IsFlyableEnemyBase(void* enemyBase, void** outPlayer);
+static void* GetPlayerBaseFromPlayer(void* player);
+static void* ResolveNpcFlightTargetPlayer();
+static void RestoreSingleEnemyFlightState(void* enemyPlayer);
 
 bool IsValidAimTransform(void* target, void* playerCtrl) {
     if (!target || target == playerCtrl) return false;
@@ -751,6 +818,32 @@ void* GetGameCtrlInstance() {
     return getGameCtrlInstance(nullptr);
 }
 
+void* GetMainCameraInstance() {
+    try {
+        void* gameCtrl = GetGameCtrlInstance();
+        if (IsProbablyValidPtr(gameCtrl)) {
+            void* cameraCtrl = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x1C); // GameCtrl.cameraCtrl
+            if (IsProbablyValidPtr(cameraCtrl)) {
+                void* mainCamera = *reinterpret_cast<void**>(reinterpret_cast<char*>(cameraCtrl) + 0x14); // CameraCtrl.MainCamera
+                if (IsProbablyValidPtr(mainCamera)) {
+                    return mainCamera;
+                }
+            }
+        }
+
+        void* uiManage = GetUIManageInstance();
+        if (IsProbablyValidPtr(uiManage)) {
+            void* uiCamera = *reinterpret_cast<void**>(reinterpret_cast<char*>(uiManage) + 0xC); // UI_Manage.uiCamera
+            if (IsProbablyValidPtr(uiCamera)) {
+                return uiCamera;
+            }
+        }
+    } catch (...) {
+    }
+
+    return nullptr;
+}
+
 void* GetMyPlayerInstance() {
     void* gameCtrl = GetGameCtrlInstance();
     if (!gameCtrl) return nullptr;
@@ -784,19 +877,355 @@ void* GetCtrlPlayerFromMyCtrl() {
     return ctrlPlayer;
 }
 
+bool GetTransformWorldPosition(void* transform, Vector3& outPos) {
+    if (!IsProbablyValidPtr(transform)) return false;
+
+    try {
+        uintptr_t addrTransformGetPosition = getAbsoluteAddress(targetLibName, 0x6EDF68); // Transform.get_position()
+        if (addrTransformGetPosition == 0) return false;
+
+        auto transformGetPosition = reinterpret_cast<TransformGetPositionFunc>(addrTransformGetPosition);
+        outPos = transformGetPosition(transform, nullptr);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool WorldToScreen(const Vector3& worldPos, Vector3& outScreenPos) {
+    outScreenPos = {0.0f, 0.0f, 0.0f};
+
+    try {
+        void* mainCamera = GetMainCameraInstance();
+        if (!IsProbablyValidPtr(mainCamera)) return false;
+
+        uintptr_t addrWorldToScreen = getAbsoluteAddress(targetLibName, 0x8448C0); // Camera.WorldToScreenPoint(Vector3)
+        uintptr_t addrScreenWidth = getAbsoluteAddress(targetLibName, 0x6E7564); // Screen.get_width()
+        uintptr_t addrScreenHeight = getAbsoluteAddress(targetLibName, 0x6E75E8); // Screen.get_height()
+        if (addrWorldToScreen == 0 || addrScreenWidth == 0 || addrScreenHeight == 0) return false;
+
+        auto worldToScreen = reinterpret_cast<CameraWorldToScreenPointFunc>(addrWorldToScreen);
+        auto screenGetWidth = reinterpret_cast<ScreenGetWidthFunc>(addrScreenWidth);
+        auto screenGetHeight = reinterpret_cast<ScreenGetHeightFunc>(addrScreenHeight);
+
+        const int screenWidth = screenGetWidth();
+        const int screenHeight = screenGetHeight();
+        if (screenWidth <= 0 || screenHeight <= 0) return false;
+
+        Vector3 unityScreen = worldToScreen(mainCamera, worldPos, nullptr);
+        if (unityScreen.z <= 0.01f) return false;
+
+        outScreenPos.x = unityScreen.x;
+        outScreenPos.y = static_cast<float>(screenHeight) - unityScreen.y; // converte de origem bottom-left do Unity para top-left
+        outScreenPos.z = unityScreen.z;
+        return outScreenPos.x >= -200.0f && outScreenPos.x <= (screenWidth + 200.0f) &&
+               outScreenPos.y >= -200.0f && outScreenPos.y <= (screenHeight + 200.0f);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool ProjectPlayerScreenAnchors(void* player, Vector3& outHeadScreen, Vector3& outRootScreen) {
+    outHeadScreen = {0.0f, 0.0f, 0.0f};
+    outRootScreen = {0.0f, 0.0f, 0.0f};
+    if (!IsProbablyValidPtr(player)) return false;
+
+    try {
+        void* head = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x3C); // Player.Head
+        void* root = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x24); // Player.Root
+        if (!IsProbablyValidPtr(head) || !IsProbablyValidPtr(root)) return false;
+
+        Vector3 headWorld = {0.0f, 0.0f, 0.0f};
+        Vector3 rootWorld = {0.0f, 0.0f, 0.0f};
+        if (!GetTransformWorldPosition(head, headWorld) || !GetTransformWorldPosition(root, rootWorld)) return false;
+        if (!WorldToScreen(headWorld, outHeadScreen) || !WorldToScreen(rootWorld, outRootScreen)) return false;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool TryBuildScreenBoxForPlayer(void* player, ScreenBox& outBox) {
+    Vector3 headScreen = {0.0f, 0.0f, 0.0f};
+    Vector3 rootScreen = {0.0f, 0.0f, 0.0f};
+    if (!ProjectPlayerScreenAnchors(player, headScreen, rootScreen)) return false;
+
+    const float height = rootScreen.y - headScreen.y;
+    if (height < 8.0f) return false;
+
+    const float width = height * 0.45f;
+    outBox.left = headScreen.x - (width * 0.5f);
+    outBox.right = headScreen.x + (width * 0.5f);
+    outBox.top = headScreen.y;
+    outBox.bottom = rootScreen.y;
+    return true;
+}
+
+static float Vector3LengthXZ(const Vector3& value) {
+    return std::sqrt((value.x * value.x) + (value.z * value.z));
+}
+
+static Vector3 NormalizeXZ(const Vector3& value) {
+    const float len = Vector3LengthXZ(value);
+    if (len <= 0.0001f) return {0.0f, 0.0f, 0.0f};
+    return {value.x / len, 0.0f, value.z / len};
+}
+
+static float ClampMagnitudeXZ(float value, float minValue, float maxValue) {
+    if (value < minValue) return minValue;
+    if (value > maxValue) return maxValue;
+    return value;
+}
+
+static bool IsNpcWarEligibleEnemyBase(void* enemyBase, void** outPlayer, void** outPlayerBase, Vector3* outPos) {
+    if (outPlayer) *outPlayer = nullptr;
+    if (outPlayerBase) *outPlayerBase = nullptr;
+    if (outPos) *outPos = {0.0f, 0.0f, 0.0f};
+
+    void* player = nullptr;
+    int baseType = -1;
+    int animalType = -1;
+    int gunID = 0;
+    Vector3 pos = {0.0f, 0.0f, 0.0f};
+    if (!ResolveCombatData(enemyBase, &player, baseType, animalType, gunID, pos)) return false;
+    if (!IsProbablyValidPtr(player)) return false;
+
+    const bool hostileHuman =
+            (baseType == EnemyNPC) &&
+            (animalType == Robber || animalType == Pro01 || animalType == Pro02 ||
+             animalType == Bid01 || animalType == Bid02);
+    const bool hostileMonster = (baseType == Zombies || baseType == Ogre);
+    const bool hostileAnimal =
+            (baseType == Animal) &&
+            (animalType == Cheetah || animalType == Bear || animalType == Wolf01 ||
+             animalType == Wolf02 || animalType == Wolf03);
+
+    if (!(hostileHuman || hostileMonster || hostileAnimal)) return false;
+
+    void* playerBase = GetPlayerBaseFromPlayer(player);
+    if (!IsProbablyValidPtr(playerBase)) return false;
+
+    if (outPlayer) *outPlayer = player;
+    if (outPlayerBase) *outPlayerBase = playerBase;
+    if (outPos) *outPos = pos;
+    return true;
+}
+
+static bool IsPoliceWarEligiblePlayer(void* player, void** outPlayerBase, Vector3* outPos) {
+    if (outPlayerBase) *outPlayerBase = nullptr;
+    if (outPos) *outPos = {0.0f, 0.0f, 0.0f};
+    if (!IsProbablyValidPtr(player) || player == GetMyPlayerInstance()) return false;
+
+    void* playerBase = GetPlayerBaseFromPlayer(player);
+    if (!IsProbablyValidPtr(playerBase)) return false;
+
+    try {
+        void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(playerBase) + 0x14); // PlayerBase.m_dPlayerBaseData
+        if (!IsProbablyValidPtr(baseData)) return false;
+
+        void* property = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0x8); // PlayerBaseData.m_dProperty
+        void* aiData = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0xC); // PlayerBaseData.m_dAIdata
+        if (!IsProbablyValidPtr(property) || !IsProbablyValidPtr(aiData)) return false;
+
+        int baseType = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0xC); // PlayerBaseProperty.baseType
+        int animalType = *reinterpret_cast<int*>(reinterpret_cast<char*>(aiData) + 0x8); // AIdata.animalType
+        if (baseType != MissionPerson) return false;
+        if (!(animalType == Sheriff || animalType == BountyHunter)) return false;
+
+        Vector3 pos = {0.0f, 0.0f, 0.0f};
+        if (!GetPlayerWorldPosition(player, pos)) return false;
+
+        if (outPlayerBase) *outPlayerBase = playerBase;
+        if (outPos) *outPos = pos;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool IsFlyableEnemyBase(void* enemyBase, void** outPlayer) {
+    if (outPlayer) *outPlayer = nullptr;
+
+    void* player = nullptr;
+    int baseType = -1;
+    int animalType = -1;
+    int gunID = 0;
+    Vector3 pos = {0.0f, 0.0f, 0.0f};
+    if (!ResolveCombatData(enemyBase, &player, baseType, animalType, gunID, pos)) return false;
+    if (!IsProbablyValidPtr(player)) return false;
+
+    const bool isHostileHuman = (baseType == EnemyNPC);
+    const bool isHostileMonster = (baseType == Zombies || baseType == Ogre);
+    const bool isHostileAnimal =
+            (baseType == Animal) &&
+            (animalType == Cheetah || animalType == Bear || animalType == Wolf01 ||
+             animalType == Wolf02 || animalType == Wolf03);
+
+    if (!(isHostileHuman || isHostileMonster || isHostileAnimal)) return false;
+
+    if (outPlayer) *outPlayer = player;
+    return true;
+}
+
+static void RestoreSingleEnemyFlightState(void* enemyPlayer) {
+    if (!IsProbablyValidPtr(enemyPlayer)) return;
+
+    uintptr_t addrSetNavMeshEnable = getAbsoluteAddress(targetLibName, 0x34897C); // Player.SetNavMesEnable(bool)
+    uintptr_t addrSetCurrentVelocity = getAbsoluteAddress(targetLibName, 0x35C8F8); // Player.SetCurrentVelocity(Vector3)
+    uintptr_t addrSetNavMeshSpeed = getAbsoluteAddress(targetLibName, 0x35C038); // Player.SetNavMesSpeed(float)
+    if (addrSetNavMeshEnable == 0 || addrSetCurrentVelocity == 0) return;
+
+    auto setNavMeshEnable = reinterpret_cast<PlayerSetNavMeshEnableFunc>(addrSetNavMeshEnable);
+    auto setCurrentVelocity = reinterpret_cast<PlayerSetCurrentVelocityFunc>(addrSetCurrentVelocity);
+    auto setNavMeshSpeed = reinterpret_cast<PlayerSetNavMeshSpeedFunc>(addrSetNavMeshSpeed);
+
+    Vector3 zeroVel = {0.0f, 0.0f, 0.0f};
+    setNavMeshEnable(enemyPlayer, true, nullptr);
+    if (addrSetNavMeshSpeed != 0) {
+        setNavMeshSpeed(enemyPlayer, 4.0f, nullptr);
+    }
+    setCurrentVelocity(enemyPlayer, zeroVel, nullptr);
+}
+
+static void* ResolveNpcFlightTargetPlayer() {
+    void* myCtrlPlayer = GetMyCtrlPlayerInstance();
+    void* myPlayer = GetMyPlayerInstance();
+    if (!IsProbablyValidPtr(myCtrlPlayer) || !IsProbablyValidPtr(myPlayer)) return nullptr;
+
+    void* preferredTarget = ResolveBestAggressiveAimTarget(myCtrlPlayer);
+    if (!IsProbablyValidPtr(preferredTarget)) {
+        preferredTarget = FindBestTarget(myCtrlPlayer);
+    }
+
+    void* enemies[64] = {};
+    int enemyCount = CollectActiveEnemyBases(enemies, 64);
+    if (enemyCount <= 0) return nullptr;
+
+    if (IsProbablyValidPtr(preferredTarget)) {
+        for (int i = 0; i < enemyCount; ++i) {
+            void* enemyPlayer = nullptr;
+            if (!IsFlyableEnemyBase(enemies[i], &enemyPlayer)) continue;
+            if (IsProbablyValidPtr(enemyPlayer) && PlayerContainsTransform(enemyPlayer, preferredTarget)) {
+                return enemyPlayer;
+            }
+        }
+    }
+
+    void* bestPlayer = nullptr;
+    float bestDistanceSq = 1.0e30f;
+    Vector3 myPos = {0.0f, 0.0f, 0.0f};
+    if (!GetPlayerWorldPosition(myPlayer, myPos)) return nullptr;
+
+    for (int i = 0; i < enemyCount; ++i) {
+        void* enemyPlayer = nullptr;
+        if (!IsFlyableEnemyBase(enemies[i], &enemyPlayer)) continue;
+        if (!IsProbablyValidPtr(enemyPlayer)) continue;
+
+        Vector3 enemyPos = {0.0f, 0.0f, 0.0f};
+        if (!GetPlayerWorldPosition(enemyPlayer, enemyPos)) continue;
+
+        float dx = enemyPos.x - myPos.x;
+        float dy = enemyPos.y - myPos.y;
+        float dz = enemyPos.z - myPos.z;
+        float distanceSq = dx * dx + dy * dy + dz * dz;
+        if (distanceSq < bestDistanceSq) {
+            bestDistanceSq = distanceSq;
+            bestPlayer = enemyPlayer;
+        }
+    }
+
+    return bestPlayer;
+}
+
+void LogWorldToScreenSamples() {
+    try {
+        void* enemies[32] = {};
+        int enemyCount = CollectActiveEnemyBases(enemies, 32);
+        if (enemyCount <= 0) {
+            __android_log_print(ANDROID_LOG_INFO, "MOD_W2S", "Nenhum inimigo ativo para projetar na tela");
+            return;
+        }
+
+        int logged = 0;
+        for (int i = 0; i < enemyCount && logged < 3; ++i) {
+            void* enemyBase = enemies[i];
+            if (!IsProbablyValidPtr(enemyBase)) continue;
+
+            void* player = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0xC); // PlayerBase.m_dPlayer
+            if (!IsProbablyValidPtr(player) || player == GetMyPlayerInstance()) continue;
+
+            Vector3 headScreen = {0.0f, 0.0f, 0.0f};
+            Vector3 rootScreen = {0.0f, 0.0f, 0.0f};
+            ScreenBox box = {};
+            const bool projected = ProjectPlayerScreenAnchors(player, headScreen, rootScreen);
+            const bool boxReady = projected && TryBuildScreenBoxForPlayer(player, box);
+
+            __android_log_print(
+                    ANDROID_LOG_INFO,
+                    "MOD_W2S",
+                    "Enemy[%d] projected=%d head=(%.1f, %.1f, %.2f) root=(%.1f, %.1f, %.2f) box=%d [L%.1f T%.1f R%.1f B%.1f]",
+                    i,
+                    projected ? 1 : 0,
+                    headScreen.x, headScreen.y, headScreen.z,
+                    rootScreen.x, rootScreen.y, rootScreen.z,
+                    boxReady ? 1 : 0,
+                    box.left, box.top, box.right, box.bottom);
+            logged++;
+        }
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_W2S", "Falha protegida ao registrar amostras WorldToScreen");
+    }
+}
+
+void RefreshTargetMarkerESP() {
+    void* creator = GetPlayingUICreatorInstance();
+    void* myCtrlPlayer = GetMyCtrlPlayerInstance();
+    if (!IsProbablyValidPtr(creator) || !IsProbablyValidPtr(myCtrlPlayer)) return;
+
+    try {
+        uintptr_t addrShow = getAbsoluteAddress(targetLibName, 0x3C9864); // UI_PlayingUI_Creator.ShowAimFollowTagetUI()
+        uintptr_t addrHide = getAbsoluteAddress(targetLibName, 0x3C994C); // UI_PlayingUI_Creator.HideAimFollowTagetUI()
+        uintptr_t addrSetTarget = getAbsoluteAddress(targetLibName, 0x3C9A34); // UI_PlayingUI_Creator.SetAimFollowTarget(Transform)
+        if (addrShow == 0 || addrHide == 0 || addrSetTarget == 0) return;
+
+        auto showMarker = reinterpret_cast<ShowAimFollowTargetUIFunc>(addrShow);
+        auto hideMarker = reinterpret_cast<HideAimFollowTargetUIFunc>(addrHide);
+        auto setMarkerTarget = reinterpret_cast<SetAimFollowTargetUIFunc>(addrSetTarget);
+
+        void* target = ResolveBestAggressiveAimTarget(myCtrlPlayer);
+        if (!IsProbablyValidPtr(target)) {
+            target = FindBestTarget(myCtrlPlayer);
+        }
+
+        if (IsProbablyValidPtr(target)) {
+            showMarker(creator, nullptr);
+            setMarkerTarget(creator, target, nullptr);
+        } else {
+            hideMarker(creator, nullptr);
+        }
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_VISUAL", "Falha protegida ao atualizar marcador ESP");
+    }
+}
+
 void SetFlyRuntimeState(bool enabled) {
     void* ctrlPlayer = GetCtrlPlayerFromMyCtrl();
     if (!ctrlPlayer) return;
 
     uintptr_t addrSetNavMeshEnable = getAbsoluteAddress(targetLibName, 0x34897C); // Player.SetNavMesEnable(bool)
     uintptr_t addrSetCurrentVelocity = getAbsoluteAddress(targetLibName, 0x35C8F8); // Player.SetCurrentVelocity(Vector3)
+    uintptr_t addrSetNavMeshSpeed = getAbsoluteAddress(targetLibName, 0x35C038); // Player.SetNavMesSpeed(float)
     if (addrSetNavMeshEnable == 0 || addrSetCurrentVelocity == 0) return;
 
     auto setNavMeshEnable = reinterpret_cast<PlayerSetNavMeshEnableFunc>(addrSetNavMeshEnable);
     auto setCurrentVelocity = reinterpret_cast<PlayerSetCurrentVelocityFunc>(addrSetCurrentVelocity);
+    auto setNavMeshSpeed = reinterpret_cast<PlayerSetNavMeshSpeedFunc>(addrSetNavMeshSpeed);
 
     // Em voo, desativa NavMesh para não prender fora da malha; ao sair, reativa.
     setNavMeshEnable(ctrlPlayer, !enabled, nullptr);
+    if (addrSetNavMeshSpeed != 0) {
+        setNavMeshSpeed(ctrlPlayer, enabled ? 0.0f : 4.0f, nullptr);
+    }
 
     // Evita estado de velocidade residual que pode bloquear input.
     Vector3 zeroVel = {0.0f, 0.0f, 0.0f};
@@ -834,6 +1263,195 @@ bool ApplyFlyPositionStep() {
     SetFlyRuntimeState(flyMode);
 
     return true;
+}
+
+void ApplyFlyMovementFrame(void* myCtrlPlayer) {
+    if (!flyMode || !IsProbablyValidPtr(myCtrlPlayer)) return;
+
+    void* ctrlPlayer = GetCtrlPlayerFromMyCtrl();
+    if (!IsProbablyValidPtr(ctrlPlayer)) return;
+
+    uintptr_t addrTranslateWithSamplePos = getAbsoluteAddress(targetLibName, 0x35CB9C); // Player.TranslateWithSamplePos(Vector3)
+    uintptr_t addrGetCurrentVelocity = getAbsoluteAddress(targetLibName, 0x35CD58); // Player.GetCurrentVelocity()
+    uintptr_t addrIsMoving = getAbsoluteAddress(targetLibName, 0x35C648); // Player.IsMoving()
+    uintptr_t addrHeading = getAbsoluteAddress(targetLibName, 0x35C0F4); // Player.Heading()
+    uintptr_t addrRotateToCameraDir = getAbsoluteAddress(targetLibName, 0x35C3B8); // Player.RotateToCameraDir()
+    uintptr_t addrSetRotationCameraDir = getAbsoluteAddress(targetLibName, 0x35C2C4); // Player.SetRotationCameraDir()
+    uintptr_t addrSetCurrentRotation = getAbsoluteAddress(targetLibName, 0x35C994); // Player.SetCurrentRotation(Vector3)
+    uintptr_t addrStopRotate = getAbsoluteAddress(targetLibName, 0x35C720); // Player.StopRotate()
+    uintptr_t addrSetCurrentVelocity = getAbsoluteAddress(targetLibName, 0x35C8F8); // Player.SetCurrentVelocity(Vector3)
+    uintptr_t addrPlayerGetPosition = getAbsoluteAddress(targetLibName, 0x341378); // Player.GetPosition()
+    uintptr_t addrSetPosMyCtrl = getAbsoluteAddress(targetLibName, 0x45D69C); // MyCtrlPlayer.SetPosition(Vector3)
+    if (addrTranslateWithSamplePos == 0 || addrGetCurrentVelocity == 0 || addrIsMoving == 0 ||
+        addrHeading == 0 || addrRotateToCameraDir == 0 || addrSetCurrentVelocity == 0 ||
+        addrPlayerGetPosition == 0 || addrSetPosMyCtrl == 0) {
+        return;
+    }
+
+    auto translateWithSamplePos = reinterpret_cast<PlayerTranslateWithSamplePosFunc>(addrTranslateWithSamplePos);
+    auto getCurrentVelocity = reinterpret_cast<PlayerGetCurrentVelocityFunc>(addrGetCurrentVelocity);
+    auto isMoving = reinterpret_cast<PlayerIsMovingFunc>(addrIsMoving);
+    auto getHeading = reinterpret_cast<PlayerHeadingFunc>(addrHeading);
+    auto rotateToCameraDir = reinterpret_cast<PlayerRotateToCameraDirFunc>(addrRotateToCameraDir);
+    auto setRotationCameraDir = reinterpret_cast<PlayerSetRotationCameraDirFunc>(addrSetRotationCameraDir);
+    auto setCurrentRotation = reinterpret_cast<PlayerSetCurrentRotationFunc>(addrSetCurrentRotation);
+    auto stopRotate = reinterpret_cast<PlayerStopRotateFunc>(addrStopRotate);
+    auto setCurrentVelocity = reinterpret_cast<PlayerSetCurrentVelocityFunc>(addrSetCurrentVelocity);
+    auto getPlayerPosition = reinterpret_cast<PlayerGetPositionFunc>(addrPlayerGetPosition);
+    auto setPosMyCtrl = reinterpret_cast<MyCtrlPlayerSetPositionFunc>(addrSetPosMyCtrl);
+
+    try {
+        static Vector3 lastStableHeading = {0.0f, 0.0f, 1.0f};
+
+        if (addrSetRotationCameraDir != 0) {
+            setRotationCameraDir(ctrlPlayer, nullptr);
+        } else {
+            rotateToCameraDir(ctrlPlayer, nullptr);
+        }
+
+        Vector3 currentVelocity = getCurrentVelocity(ctrlPlayer, nullptr);
+        Vector3 heading = getHeading(ctrlPlayer, nullptr);
+        bool moving = isMoving(ctrlPlayer, nullptr);
+
+        Vector3 normalizedHeading = NormalizeXZ(heading);
+        if (Vector3LengthXZ(normalizedHeading) <= 0.001f) {
+            normalizedHeading = NormalizeXZ(currentVelocity);
+        }
+        if (Vector3LengthXZ(normalizedHeading) <= 0.001f) {
+            normalizedHeading = lastStableHeading;
+        } else {
+            lastStableHeading = normalizedHeading;
+        }
+
+        const float inputSpeed = 1.2f + (flyVerticalSpeed * 0.65f);
+        const float horizontalSpeed = ClampMagnitudeXZ(inputSpeed, 1.0f, 12.0f);
+        const float hoverLift = 0.02f + (flyHeightStep * 0.035f);
+        const float movingLift = moving ? ((flyHeightStep * 0.07f) + (flyVerticalSpeed * 0.01f)) : 0.0f;
+        const float damping = moving ? 0.18f : 0.10f;
+
+        Vector3 desiredVelocity = {0.0f, hoverLift + movingLift, 0.0f};
+        if (Vector3LengthXZ(normalizedHeading) > 0.001f && (moving || Vector3LengthXZ(currentVelocity) > 0.05f)) {
+            desiredVelocity.x = normalizedHeading.x * horizontalSpeed;
+            desiredVelocity.z = normalizedHeading.z * horizontalSpeed;
+        } else {
+            desiredVelocity.x = currentVelocity.x * damping;
+            desiredVelocity.z = currentVelocity.z * damping;
+        }
+
+        if (addrSetCurrentRotation != 0) {
+            setCurrentRotation(ctrlPlayer, desiredVelocity, nullptr);
+        }
+        if (!moving && addrStopRotate != 0) {
+            stopRotate(ctrlPlayer, nullptr);
+        }
+
+        setCurrentVelocity(ctrlPlayer, desiredVelocity, nullptr);
+        translateWithSamplePos(ctrlPlayer, desiredVelocity, nullptr);
+
+        Vector3 syncedPos = getPlayerPosition(ctrlPlayer, nullptr);
+        setPosMyCtrl(myCtrlPlayer, syncedPos, nullptr);
+    } catch (...) {
+    }
+}
+
+void SetEnemyFlightState(bool enabled) {
+    if (!enabled) {
+        RestoreSingleEnemyFlightState(npcFlightTargetPlayer);
+        npcFlightTargetPlayer = nullptr;
+        return;
+    }
+
+    void* targetEnemyPlayer = ResolveNpcFlightTargetPlayer();
+    if (IsProbablyValidPtr(targetEnemyPlayer)) {
+        npcFlightTargetPlayer = targetEnemyPlayer;
+    }
+}
+
+void ApplyEnemyFlyMovementFrame() {
+    if (!npcFlyMode) return;
+
+    static int enemyFlyFrameCounter = 0;
+    enemyFlyFrameCounter++;
+    if ((enemyFlyFrameCounter % 2) != 0) return;
+
+    uintptr_t addrSetNavMeshEnable = getAbsoluteAddress(targetLibName, 0x34897C); // Player.SetNavMesEnable(bool)
+    uintptr_t addrSetNavMeshSpeed = getAbsoluteAddress(targetLibName, 0x35C038); // Player.SetNavMesSpeed(float)
+    uintptr_t addrGetPosition = getAbsoluteAddress(targetLibName, 0x341378); // Player.GetPosition()
+    uintptr_t addrSetPosition = getAbsoluteAddress(targetLibName, 0x348A38); // Player.SetPosition(Vector3)
+    uintptr_t addrGetCurrentVelocity = getAbsoluteAddress(targetLibName, 0x35CD58); // Player.GetCurrentVelocity()
+    uintptr_t addrHeading = getAbsoluteAddress(targetLibName, 0x35C0F4); // Player.Heading()
+    uintptr_t addrSetCurrentVelocity = getAbsoluteAddress(targetLibName, 0x35C8F8); // Player.SetCurrentVelocity(Vector3)
+    uintptr_t addrTranslateWithSamplePos = getAbsoluteAddress(targetLibName, 0x35CB9C); // Player.TranslateWithSamplePos(Vector3)
+    uintptr_t addrRotateToDir = getAbsoluteAddress(targetLibName, 0x344E34); // Player.RotateToDir(Vector3)
+    if (addrSetNavMeshEnable == 0 || addrGetPosition == 0 || addrSetPosition == 0 ||
+        addrGetCurrentVelocity == 0 || addrSetCurrentVelocity == 0 || addrTranslateWithSamplePos == 0) {
+        return;
+    }
+
+    auto setNavMeshEnable = reinterpret_cast<PlayerSetNavMeshEnableFunc>(addrSetNavMeshEnable);
+    auto setNavMeshSpeed = reinterpret_cast<PlayerSetNavMeshSpeedFunc>(addrSetNavMeshSpeed);
+    auto getPosition = reinterpret_cast<PlayerGetPositionFunc>(addrGetPosition);
+    auto setPosition = reinterpret_cast<PlayerSetPositionFunc>(addrSetPosition);
+    auto getCurrentVelocity = reinterpret_cast<PlayerGetCurrentVelocityFunc>(addrGetCurrentVelocity);
+    auto getHeading = reinterpret_cast<PlayerHeadingFunc>(addrHeading);
+    auto setCurrentVelocity = reinterpret_cast<PlayerSetCurrentVelocityFunc>(addrSetCurrentVelocity);
+    auto translateWithSamplePos = reinterpret_cast<PlayerTranslateWithSamplePosFunc>(addrTranslateWithSamplePos);
+    auto rotateToDir = reinterpret_cast<PlayerRotateToDirFunc>(addrRotateToDir);
+
+    try {
+        void* targetEnemyPlayer = ResolveNpcFlightTargetPlayer();
+        if (!IsProbablyValidPtr(targetEnemyPlayer)) {
+            RestoreSingleEnemyFlightState(npcFlightTargetPlayer);
+            npcFlightTargetPlayer = nullptr;
+            return;
+        }
+
+        if (IsProbablyValidPtr(npcFlightTargetPlayer) && npcFlightTargetPlayer != targetEnemyPlayer) {
+            RestoreSingleEnemyFlightState(npcFlightTargetPlayer);
+        }
+        npcFlightTargetPlayer = targetEnemyPlayer;
+
+        setNavMeshEnable(targetEnemyPlayer, false, nullptr);
+        if (addrSetNavMeshSpeed != 0) {
+            setNavMeshSpeed(targetEnemyPlayer, 0.0f, nullptr);
+        }
+
+        Vector3 currentPos = getPosition(targetEnemyPlayer, nullptr);
+        Vector3 currentVelocity = getCurrentVelocity(targetEnemyPlayer, nullptr);
+        Vector3 heading = addrHeading != 0 ? getHeading(targetEnemyPlayer, nullptr) : Vector3{0.0f, 0.0f, 0.0f};
+        Vector3 drift = NormalizeXZ(heading);
+        if (Vector3LengthXZ(drift) <= 0.001f) {
+            drift = NormalizeXZ(currentVelocity);
+        }
+
+        const float liftPerTick = 0.10f + (npcFlyLift * 0.12f);
+        float driftSpeed = Vector3LengthXZ(currentVelocity) * 0.16f;
+        driftSpeed = ClampMagnitudeXZ(driftSpeed, 0.10f, 1.10f);
+
+        Vector3 desiredVelocity = {0.0f, liftPerTick, 0.0f};
+        Vector3 nextPos = currentPos;
+        nextPos.y += liftPerTick;
+
+        if (Vector3LengthXZ(drift) > 0.001f) {
+            desiredVelocity.x = drift.x * driftSpeed;
+            desiredVelocity.z = drift.z * driftSpeed;
+            nextPos.x += desiredVelocity.x;
+            nextPos.z += desiredVelocity.z;
+            if (addrRotateToDir != 0) {
+                rotateToDir(targetEnemyPlayer, drift, nullptr);
+            }
+        } else {
+            desiredVelocity.x = currentVelocity.x * 0.02f;
+            desiredVelocity.z = currentVelocity.z * 0.02f;
+            nextPos.x += desiredVelocity.x;
+            nextPos.z += desiredVelocity.z;
+        }
+
+        setCurrentVelocity(targetEnemyPlayer, desiredVelocity, nullptr);
+        setPosition(targetEnemyPlayer, nextPos, nullptr);
+        translateWithSamplePos(targetEnemyPlayer, desiredVelocity, nullptr);
+    } catch (...) {
+    }
 }
 
 /**
@@ -1673,6 +2291,14 @@ void hook_SetAimState(void* thisPtr, AimTargetState state, void* target, bool fo
 void ProcessGameplayFrame(void* myCtrlPlayer) {
     if (!myCtrlPlayer) return;
 
+    if (debugEnemyPos) {
+        static int worldToScreenLogFrameCounter = 0;
+        worldToScreenLogFrameCounter++;
+        if ((worldToScreenLogFrameCounter % 120) == 0) {
+            LogWorldToScreenSamples();
+        }
+    }
+
     if (pendingBulletTailClear) {
         ClearBulletTailNow();
         pendingBulletTailClear = false;
@@ -1703,6 +2329,36 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
         pendingShowWordsCustom = false;
     }
 
+    if (pendingChaosTime) {
+        RunChaosTimeOnce();
+        pendingChaosTime = false;
+    }
+
+    if (pendingChaosSpawn) {
+        RunChaosSpawnOnce();
+        pendingChaosSpawn = false;
+    }
+
+    if (pendingChaosUI) {
+        RunChaosUIOnce();
+        pendingChaosUI = false;
+    }
+
+    if (pendingChaosWeapon) {
+        RunChaosWeaponOnce();
+        pendingChaosWeapon = false;
+    }
+
+    if (flyMode) {
+        ApplyFlyMovementFrame(myCtrlPlayer);
+    }
+    if (npcFlyMode) {
+        ApplyEnemyFlyMovementFrame();
+    }
+    if (npcWarMode) {
+        RunNpcWarFrame();
+    }
+
     ProcessGameplayHints();
 
     if (pendingEspClear) {
@@ -1723,8 +2379,19 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
     if (completeEsp && CanEnableCompleteESP()) {
         static int espFrameCounter = 0;
         espFrameCounter++;
+        if ((espFrameCounter % 12) == 0) {
+            RefreshTargetMarkerESP();
+        }
         if ((espFrameCounter % 45) == 0) {
             RefreshCompleteESP();
+        }
+    }
+
+    if ((aimBot || aimBotAggressive) && IsProbablyValidPtr(GetPlayingUICreatorInstance())) {
+        static int markerFrameCounter = 0;
+        markerFrameCounter++;
+        if ((markerFrameCounter % 10) == 0) {
+            RefreshTargetMarkerESP();
         }
     }
 
@@ -1920,6 +2587,14 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("32_Toggle_Modo Voo (Experimental) (15/02/2026)"),
             OBFUSCATE("33_SeekBar_Velocidade Vertical_1_20"),
             OBFUSCATE("34_SeekBar_Ganho de Altura_1_50"),
+            OBFUSCATE("50_Toggle_NPCs Hostis Voadores (08/03/2026)"),
+            OBFUSCATE("51_SeekBar_Intensidade do Voo NPC_1_30"),
+            OBFUSCATE("Category_Chaos"),
+            OBFUSCATE("52_Button_Chaos Time (08/03/2026)"),
+            OBFUSCATE("53_Button_Chaos Spawn (08/03/2026)"),
+            OBFUSCATE("54_Button_Chaos UI (08/03/2026)"),
+            OBFUSCATE("55_Button_Chaos Weapon (08/03/2026)"),
+            OBFUSCATE("56_Toggle_NPC War Entre Hostis (08/03/2026)"),
 
             // Visual do jogo
             OBFUSCATE("Category_Visual do Jogo"),
@@ -2210,6 +2885,45 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
                 flyHeightStep = (float)value / 10.0f;
                 __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Ganho de altura ajustado para: %.2f", flyHeightStep);
                 ApplyFlyPositionStep(); // efeito imediato ao mover slider
+            }
+            break;
+        case 50: // NPCs hostis voadores
+            npcFlyMode = boolean;
+            if (boolean) {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "NPCs hostis voadores ativados");
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "NPCs hostis voadores desativados");
+            }
+            SetEnemyFlightState(npcFlyMode);
+            break;
+        case 51: // Intensidade do voo NPC
+            if (value >= 1 && value <= 30) {
+                npcFlyLift = (float)value / 10.0f;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Intensidade do voo NPC ajustada para: %.2f", npcFlyLift);
+            }
+            break;
+        case 52: // Chaos Time
+            pendingChaosTime = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos Time agendado");
+            break;
+        case 53: // Chaos Spawn
+            pendingChaosSpawn = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos Spawn agendado");
+            break;
+        case 54: // Chaos UI
+            pendingChaosUI = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos UI agendado");
+            break;
+        case 55: // Chaos Weapon
+            pendingChaosWeapon = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos Weapon agendado");
+            break;
+        case 56: // NPC War entre hostis
+            npcWarMode = boolean;
+            if (boolean) {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "NPC War entre hostis ativado");
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "NPC War entre hostis desativado");
             }
             break;
         case 36: // Criar Mission Hints Visuais
@@ -3340,6 +4054,360 @@ void ShowWordsHintText(const char* text, float showTime) {
     }
 }
 
+void RunChaosTimeOnce() {
+    try {
+        uintptr_t addrSetTimeScale = getAbsoluteAddress(targetLibName, 0x2EF174); // GameCtrl.SetTimeScale(float)
+        uintptr_t addrRecoverTimeScale = getAbsoluteAddress(targetLibName, 0x2EEF48); // GameCtrl.RecoverTimeScale()
+        if (addrSetTimeScale == 0 || addrRecoverTimeScale == 0) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_CHAOS", "Chaos Time bloqueado: offsets invalidos");
+            return;
+        }
+
+        auto setTimeScale = reinterpret_cast<GameCtrlSetTimeScaleFunc>(addrSetTimeScale);
+        auto recoverTimeScale = reinterpret_cast<GameCtrlRecoverTimeScaleFunc>(addrRecoverTimeScale);
+
+        static int chaosTimeStage = 0;
+        static const float kStages[] = {0.25f, 1.75f, 4.0f, 8.0f};
+
+        if (chaosTimeStage >= 4) {
+            recoverTimeScale(nullptr);
+            ShowWordsHintText("CHAOS TIME RESET", 2.2f);
+            __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos Time: TimeScale restaurado");
+            chaosTimeStage = 0;
+            return;
+        }
+
+        float stageValue = kStages[chaosTimeStage];
+        setTimeScale(stageValue, nullptr);
+
+        char buffer[64] = {0};
+        std::snprintf(buffer, sizeof(buffer), "CHAOS TIME %.2fx", stageValue);
+        ShowWordsHintText(buffer, 2.0f);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos Time aplicado: %.2fx", stageValue);
+        chaosTimeStage++;
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_CHAOS", "Falha protegida no Chaos Time");
+    }
+}
+
+void RunChaosSpawnOnce() {
+    try {
+        void* missionCtrl = GetMissionCtrlInstance();
+        if (!IsProbablyValidPtr(missionCtrl)) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_CHAOS", "Chaos Spawn bloqueado: MissionCtrl indisponivel");
+            return;
+        }
+
+        uintptr_t addrGenerateTutorialEnemy = getAbsoluteAddress(targetLibName, 0x281AD8); // MissionCtrl.GenerateTutorialEnemy()
+        uintptr_t addrInitNoTaskingAnimal = getAbsoluteAddress(targetLibName, 0x270834); // MissionCtrl.InitNoTaskingAnimal()
+        uintptr_t addrInitNoTaskingNpc = getAbsoluteAddress(targetLibName, 0x270D34); // MissionCtrl.InitNoTaskingNpc()
+        uintptr_t addrInitNoPermanentNpc = getAbsoluteAddress(targetLibName, 0x271080); // MissionCtrl.InitNoPermanentNpc()
+        uintptr_t addrInitCollectableBox = getAbsoluteAddress(targetLibName, 0x2717A4); // MissionCtrl.InitCollectableBox()
+        auto generateTutorialEnemy = reinterpret_cast<MissionCtrlGenerateTutorialEnemyFunc>(addrGenerateTutorialEnemy);
+        auto initNoTaskingAnimal = reinterpret_cast<MissionCtrlSimpleActionFunc>(addrInitNoTaskingAnimal);
+        auto initNoTaskingNpc = reinterpret_cast<MissionCtrlSimpleActionFunc>(addrInitNoTaskingNpc);
+        auto initNoPermanentNpc = reinterpret_cast<MissionCtrlSimpleActionFunc>(addrInitNoPermanentNpc);
+        auto initCollectableBox = reinterpret_cast<MissionCtrlSimpleActionFunc>(addrInitCollectableBox);
+
+        GeneratePolice(missionCtrl);
+        GeneratePolice(missionCtrl);
+        GeneratePolice(missionCtrl);
+        if (addrInitNoTaskingAnimal != 0) {
+            initNoTaskingAnimal(missionCtrl, nullptr);
+        }
+        if (addrInitNoTaskingNpc != 0) {
+            initNoTaskingNpc(missionCtrl, nullptr);
+        }
+        if (addrInitNoPermanentNpc != 0) {
+            initNoPermanentNpc(missionCtrl, nullptr);
+        }
+        if (addrInitCollectableBox != 0) {
+            initCollectableBox(missionCtrl, nullptr);
+        }
+        if (addrGenerateTutorialEnemy != 0) {
+            generateTutorialEnemy(missionCtrl, nullptr);
+            generateTutorialEnemy(missionCtrl, nullptr);
+        }
+
+        pendingMiniMapEspRefresh = true;
+        pendingEspRefresh = true;
+        ShowWordsHintText("CHAOS SPAWN MAXIMO", 2.8f);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos Spawn executado com policia, tutorial, npcs, animais e caixas");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_CHAOS", "Falha protegida no Chaos Spawn");
+    }
+}
+
+void RunChaosUIOnce() {
+    try {
+        void* creator = GetPlayingUICreatorInstance();
+        if (IsProbablyValidPtr(creator)) {
+            uintptr_t addrShowHeadshoot = getAbsoluteAddress(targetLibName, 0x3C9730); // UI_PlayingUI_Creator.ShowHeadshoot()
+            uintptr_t addrShowMiniMap = getAbsoluteAddress(targetLibName, 0x3C91A0); // UI_PlayingUI_Creator.ShowMiniMap()
+            if (addrShowHeadshoot != 0) {
+                auto showHeadshoot = reinterpret_cast<ShowHeadshootUIFunc>(addrShowHeadshoot);
+                showHeadshoot(creator, nullptr);
+            }
+            if (addrShowMiniMap != 0) {
+                auto showMiniMap = reinterpret_cast<ShowMiniMapUIFunc>(addrShowMiniMap);
+                showMiniMap(creator, nullptr);
+            }
+        }
+
+        ShowWordsHintText("CHAOS UI", 1.8f);
+        ShowWordsHintText("ESP VISUAL ESTOURADO", 2.4f);
+        RefreshTargetMarkerESP();
+        RefreshMiniMapEnemyEsp();
+        RefreshCompleteESP();
+        GenerateBulletTailForAllActiveEnemies();
+        __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos UI executado");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_CHAOS", "Falha protegida no Chaos UI");
+    }
+}
+
+void RunChaosWeaponOnce() {
+    try {
+        void* gameCtrl = GetGameCtrlInstance();
+        if (!IsProbablyValidPtr(gameCtrl)) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_CHAOS", "Chaos Weapon bloqueado: GameCtrl indisponivel");
+            return;
+        }
+
+        MyPlayerOriData* playerData = GetPlayerOriData();
+        if (!playerData) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_CHAOS", "Chaos Weapon bloqueado: MyPlayerOriData indisponivel");
+            return;
+        }
+
+        uintptr_t addrChangedWeapon = getAbsoluteAddress(targetLibName, 0x2F1EDC); // GameCtrl.ChangedWeapon(int, bool)
+        uintptr_t addrSetHorseParam = getAbsoluteAddress(targetLibName, 0x2F0F40); // GameCtrl.SetHorseParam(int)
+        uintptr_t addrChangeHorse = getAbsoluteAddress(targetLibName, 0x2F2450); // GameCtrl.ChangeHorse(int)
+        if (addrChangedWeapon == 0 || addrSetHorseParam == 0 || addrChangeHorse == 0) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_CHAOS", "Chaos Weapon bloqueado: offsets invalidos");
+            return;
+        }
+
+        auto changedWeapon = reinterpret_cast<GameCtrlChangedWeaponFunc>(addrChangedWeapon);
+        auto setHorseParam = reinterpret_cast<GameCtrlSetHorseParamFunc>(addrSetHorseParam);
+        auto changeHorse = reinterpret_cast<GameCtrlChangeHorseFunc>(addrChangeHorse);
+
+        static int weaponStage = 0;
+        int stage = weaponStage % 3;
+        int appliedId = 0;
+        const char* appliedKind = "LOADOUT";
+
+        if (stage == 0) {
+            int gunId = playerData->gun_ID > 0 ? playerData->gun_ID :
+                        (playerData->pistol_ID > 0 ? playerData->pistol_ID : playerData->long_gun_ID);
+            if (gunId > 0) {
+                changedWeapon(gameCtrl, gunId, true, nullptr);
+                appliedId = gunId;
+                appliedKind = "ARMA";
+            }
+        } else if (stage == 1) {
+            int knifeId = playerData->knife_ID;
+            if (knifeId > 0) {
+                changedWeapon(gameCtrl, knifeId, false, nullptr);
+                appliedId = knifeId;
+                appliedKind = "FACA";
+            }
+        } else {
+            int horseId = playerData->horse_ID;
+            if (horseId < 10 || horseId > 15) {
+                horseId = 10;
+            } else {
+                horseId++;
+                if (horseId > 15) horseId = 10;
+            }
+            setHorseParam(gameCtrl, horseId, nullptr);
+            changeHorse(gameCtrl, horseId, nullptr);
+            appliedId = horseId;
+            appliedKind = "CAVALO";
+        }
+
+        if (appliedId <= 0) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_CHAOS", "Chaos Weapon ignorado: IDs atuais do player invalidos");
+            return;
+        }
+
+        char buffer[96] = {0};
+        std::snprintf(buffer, sizeof(buffer), "CHAOS %s %d", appliedKind, appliedId);
+        ShowWordsHintText(buffer, 2.6f);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos Weapon aplicado: tipo=%s id=%d", appliedKind, appliedId);
+        weaponStage++;
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_CHAOS", "Falha protegida no Chaos Weapon");
+    }
+}
+
+void RunNpcWarFrame() {
+    static int npcWarFrameCounter = 0;
+    static void* cachedAttackerPlayer = nullptr;
+    static void* cachedDefenderPlayer = nullptr;
+    static void* cachedAttackerBase = nullptr;
+    static void* cachedDefenderBase = nullptr;
+    static Vector3 cachedAttackerPos = {0.0f, 0.0f, 0.0f};
+    static Vector3 cachedDefenderPos = {0.0f, 0.0f, 0.0f};
+    npcWarFrameCounter++;
+    if ((npcWarFrameCounter % 30) != 0) return;
+
+    try {
+        uintptr_t addrBeHit = getAbsoluteAddress(targetLibName, 0x31B830); // PlayerBase.BeHit()
+        uintptr_t addrGetAttackBlood = getAbsoluteAddress(targetLibName, 0x31B7F8); // PlayerBase.GetAttackBlood()
+        if (addrBeHit == 0) return;
+
+        auto beHit = reinterpret_cast<PlayerBaseBeHitFunc>(addrBeHit);
+        auto getAttackBlood = reinterpret_cast<int (*)(void*, void*)>(addrGetAttackBlood);
+
+        void* gameCtrl = GetGameCtrlInstance();
+        if (!IsProbablyValidPtr(gameCtrl)) return;
+
+        const bool needsRefresh =
+                !IsProbablyValidPtr(cachedAttackerPlayer) || !IsProbablyValidPtr(cachedDefenderPlayer) ||
+                !IsProbablyValidPtr(cachedAttackerBase) || !IsProbablyValidPtr(cachedDefenderBase) ||
+                (npcWarFrameCounter % 150) == 0;
+
+        if (needsRefresh) {
+            void* attackerPlayer = nullptr;
+            void* defenderPlayer = nullptr;
+            void* attackerBase = nullptr;
+            void* defenderBase = nullptr;
+            Vector3 attackerPos = {0.0f, 0.0f, 0.0f};
+            Vector3 defenderPos = {0.0f, 0.0f, 0.0f};
+            float bestDistanceSq = 1.0e30f;
+
+            bool foundPolicePair = false;
+            void* missionCtrl = GetMissionCtrlInstance();
+            if (IsProbablyValidPtr(missionCtrl)) {
+                void* policeListPtr = *reinterpret_cast<void**>(reinterpret_cast<char*>(missionCtrl) + 0x44); // MissionCtrl.policePlayers
+                if (IsProbablyValidPtr(policeListPtr)) {
+                    auto* policeList = reinterpret_cast<Il2CppList<void*>*>(policeListPtr);
+                    if (policeList && policeList->items) {
+                        int size = policeList->size;
+                        if (size > 1 && size <= 64) {
+                            uint32_t maxLength = policeList->items->max_length;
+                            int limit = size < static_cast<int>(maxLength) ? size : static_cast<int>(maxLength);
+                            for (int i = 0; i < limit; ++i) {
+                                void* lhsPlayer = policeList->items->items[i];
+                                void* lhsBase = nullptr;
+                                Vector3 lhsPos = {0.0f, 0.0f, 0.0f};
+                                if (!IsPoliceWarEligiblePlayer(lhsPlayer, &lhsBase, &lhsPos)) continue;
+
+                                for (int j = i + 1; j < limit; ++j) {
+                                    void* rhsPlayer = policeList->items->items[j];
+                                    void* rhsBase = nullptr;
+                                    Vector3 rhsPos = {0.0f, 0.0f, 0.0f};
+                                    if (!IsPoliceWarEligiblePlayer(rhsPlayer, &rhsBase, &rhsPos)) continue;
+
+                                    float dx = rhsPos.x - lhsPos.x;
+                                    float dy = rhsPos.y - lhsPos.y;
+                                    float dz = rhsPos.z - lhsPos.z;
+                                    float distanceSq = dx * dx + dy * dy + dz * dz;
+                                    if (distanceSq < 9.0f || distanceSq > 256.0f) continue;
+
+                                    if (distanceSq < bestDistanceSq) {
+                                        bestDistanceSq = distanceSq;
+                                        attackerPlayer = lhsPlayer;
+                                        defenderPlayer = rhsPlayer;
+                                        attackerPos = lhsPos;
+                                        defenderPos = rhsPos;
+                                        attackerBase = lhsBase;
+                                        defenderBase = rhsBase;
+                                        foundPolicePair = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!foundPolicePair) {
+                void* enemies[48] = {};
+                int enemyCount = CollectActiveEnemyBases(enemies, 48);
+                if (enemyCount < 2) return;
+
+                for (int i = 0; i < enemyCount; ++i) {
+                    void* lhsPlayer = nullptr;
+                    void* lhsBase = nullptr;
+                    Vector3 lhsPos = {0.0f, 0.0f, 0.0f};
+                    if (!IsNpcWarEligibleEnemyBase(enemies[i], &lhsPlayer, &lhsBase, &lhsPos)) continue;
+
+                    for (int j = i + 1; j < enemyCount; ++j) {
+                        void* rhsPlayer = nullptr;
+                        void* rhsBase = nullptr;
+                        Vector3 rhsPos = {0.0f, 0.0f, 0.0f};
+                        if (!IsNpcWarEligibleEnemyBase(enemies[j], &rhsPlayer, &rhsBase, &rhsPos)) continue;
+                        if (!IsProbablyValidPtr(rhsPlayer) || rhsPlayer == lhsPlayer) continue;
+
+                        float dx = rhsPos.x - lhsPos.x;
+                        float dy = rhsPos.y - lhsPos.y;
+                        float dz = rhsPos.z - lhsPos.z;
+                        float distanceSq = dx * dx + dy * dy + dz * dz;
+                        if (distanceSq < 9.0f || distanceSq > 196.0f) continue;
+
+                        if (distanceSq < bestDistanceSq) {
+                            bestDistanceSq = distanceSq;
+                            attackerPlayer = lhsPlayer;
+                            defenderPlayer = rhsPlayer;
+                            attackerPos = lhsPos;
+                            defenderPos = rhsPos;
+                            attackerBase = lhsBase;
+                            defenderBase = rhsBase;
+                        }
+                    }
+                }
+            }
+
+            cachedAttackerPlayer = attackerPlayer;
+            cachedDefenderPlayer = defenderPlayer;
+            cachedAttackerBase = attackerBase;
+            cachedDefenderBase = defenderBase;
+            cachedAttackerPos = attackerPos;
+            cachedDefenderPos = defenderPos;
+        } else {
+            if (!GetPlayerWorldPosition(cachedAttackerPlayer, cachedAttackerPos) ||
+                !GetPlayerWorldPosition(cachedDefenderPlayer, cachedDefenderPos)) {
+                cachedAttackerPlayer = nullptr;
+                cachedDefenderPlayer = nullptr;
+                cachedAttackerBase = nullptr;
+                cachedDefenderBase = nullptr;
+                return;
+            }
+        }
+
+        if (!IsProbablyValidPtr(cachedAttackerPlayer) || !IsProbablyValidPtr(cachedDefenderPlayer) ||
+            !IsProbablyValidPtr(cachedAttackerBase) || !IsProbablyValidPtr(cachedDefenderBase)) {
+            return;
+        }
+
+        int attackerDamage = 6;
+        int defenderDamage = 6;
+        if (addrGetAttackBlood != 0) {
+            int lhsDamage = getAttackBlood(cachedAttackerBase, nullptr);
+            int rhsDamage = getAttackBlood(cachedDefenderBase, nullptr);
+            if (lhsDamage > 0 && lhsDamage < 5000) attackerDamage = lhsDamage;
+            if (rhsDamage > 0 && rhsDamage < 5000) defenderDamage = rhsDamage;
+        }
+        attackerDamage = attackerDamage > 18 ? 18 : attackerDamage;
+        defenderDamage = defenderDamage > 18 ? 18 : defenderDamage;
+
+        beHit(cachedDefenderBase, attackerDamage, 0, nullptr);
+        beHit(cachedAttackerBase, defenderDamage, 0, nullptr);
+
+        if ((npcWarFrameCounter % 90) == 0) {
+            void* bulletTailFactory = GetBulletTailFactoryInstance();
+            if (IsProbablyValidPtr(bulletTailFactory)) {
+                GenerateBulletTailForPlayer(bulletTailFactory, cachedAttackerPos, cachedDefenderPlayer, true);
+                GenerateBulletTailForPlayer(bulletTailFactory, cachedDefenderPos, cachedAttackerPlayer, true);
+            }
+        }
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_CHAOS", "Falha protegida no NPC War");
+    }
+}
+
 static int GetListCountSafe(void* listPtr) {
     if (!IsProbablyValidPtr(listPtr)) return 0;
 
@@ -3466,6 +4534,7 @@ void ProcessGameplayHints() {
     static bool lastBulletTailEsp = false;
     static bool lastAimBot = false;
     static bool lastAimBotAggressive = false;
+    static bool lastNpcWar = false;
     static int lastScene = -1;
     static int lastEnemyCount = -1;
     static int lastPoliceCount = -1;
@@ -3480,6 +4549,7 @@ void ProcessGameplayHints() {
         lastBulletTailEsp = bulletTailEsp;
         lastAimBot = aimBot;
         lastAimBotAggressive = aimBotAggressive;
+        lastNpcWar = npcWarMode;
         lastScene = GetCurrentGameSceneValue();
         lastTrackedPlayers = CollectTrackedPlayers(initialTracked, 256);
         initialized = true;
@@ -3508,6 +4578,11 @@ void ProcessGameplayHints() {
     if (lastAimBotAggressive != aimBotAggressive) {
         ShowWordsHintText(aimBotAggressive ? "AIMBOT AGRESSIVO ON" : "AIMBOT AGRESSIVO OFF", 2.0f);
         lastAimBotAggressive = aimBotAggressive;
+    }
+
+    if (lastNpcWar != npcWarMode) {
+        ShowWordsHintText(npcWarMode ? "NPC WAR ON" : "NPC WAR OFF", 2.0f);
+        lastNpcWar = npcWarMode;
     }
 
     int currentScene = GetCurrentGameSceneValue();
