@@ -83,6 +83,7 @@ bool completeEsp = false;            // 👁️ ESP completo com barras de vida
 bool autoKill = false;               // ☠️ Mata inimigos ativos com BeHit
 bool bulletTailEsp = false;          // 🔫 Desenha trilhas de tiro em NPCs armados
 bool minimapEnemyEsp = false;        // 🗺️ ESP de inimigos no minimapa
+bool autoClearPolice = false;        // 🚔 Limpa policiais continuamente
 int sliderValue = 1, Moedas = 0, Gems = 0;
 float speedMultiplier = 1.0f;
 float flyVerticalSpeed = 5.0f;
@@ -109,6 +110,8 @@ volatile bool pendingChaosTime = false;
 volatile bool pendingChaosSpawn = false;
 volatile bool pendingChaosUI = false;
 volatile bool pendingChaosWeapon = false;
+volatile bool pendingChaosFx = false;
+volatile bool pendingKillPoliceOnly = false;
 char pendingCustomWordsText[256] = {0};
 
 // Estrutura para dados do jogador em tempo real
@@ -243,6 +246,11 @@ typedef void (*MissionCtrlGenerateTutorialEnemyFunc)(void* thisPtr, void* method
 typedef void (*MissionCtrlSimpleActionFunc)(void* thisPtr, void* method);
 typedef void (*ShowHeadshootUIFunc)(void* thisPtr, void* method);
 typedef void (*ShowMiniMapUIFunc)(void* thisPtr, void* method);
+typedef void (*EnableAimCenterUIFunc)(void* thisPtr, bool active, void* method);
+typedef void (*SetMissionTimeRegulatorFunc)(void* thisPtr, float time, void* method);
+typedef void (*DisableMissionTimeRegulatorFunc)(void* thisPtr, void* method);
+typedef void (*SetHorseSprintEnableFunc)(void* thisPtr, bool enable, void* method);
+typedef void (*SetCurrentHorseSprintFunc)(void* thisPtr, float length, void* method);
 
 // Tipos de função corrigidos
 typedef MyPlayerOriData* (*GetMyPlayerOriDataFunc)();
@@ -347,6 +355,29 @@ enum PoliceScenePosType {
     NV_PoliceWarrant = 14     // ✅ Mandado policial
 };
 
+enum ScenePosType {
+    ScenePosType_Null = 0,
+    ScenePosType_NV_Square = 1,
+    ScenePosType_NV_PoliceStation = 5
+};
+
+enum Effects {
+    Effects_Null = 0,
+    Effects_GunHitWood = 1,
+    Effects_GunHitBlood = 2,
+    Effects_MissionMainEffect = 3,
+    Effects_MissionBranchEffect = 4,
+    Effects_ShootPracticeEffect = 5,
+    Effects_QuickDrawEffect = 6,
+    Effects_HorseRideEffect = 7,
+    Effects_DartEffect = 8,
+    Effects_TwentyOneEffect = 9,
+    Effects_DestinationEffect = 10,
+    Effects_Gunshoot_Pistol = 11,
+    Effects_Gunshoot_Rifle = 12,
+    Effects_Gunshoot_Shotgun = 13
+};
+
 typedef void (*UpdateAimTargetFunc)(void* thisPtr);
 typedef void (*SetAimStateFunc)(void* thisPtr, AimTargetState state, void* target, bool forceTarget);
 
@@ -364,6 +395,8 @@ typedef void (*CreateMissionHintsFunc)(void* thisPtr, int gameScene, int mission
 typedef void (*DestroyMissionHintsFunc)(void* thisPtr, void* method);
 typedef void* (*GetGunParticalEffectsCtrlInstanceFunc)(void* method);
 typedef void (*ToggleSceneMissionHintsFunc)(void* thisPtr, void* method);
+typedef void (*EffectParamCtorFunc)(void* thisPtr, Vector3 pos, Vector3 rot, float duration, void* parent, int scenePosType, bool enableBoxCollider, void* method);
+typedef void (*SceneInOutToggleEffectFunc)(void* thisPtr, void* method);
 typedef void* (*GetUIManageInstanceFunc)(void* method);
 typedef void (*ShowAimFollowTargetUIFunc)(void* thisPtr, void* method);
 typedef void (*HideAimFollowTargetUIFunc)(void* thisPtr, void* method);
@@ -390,6 +423,9 @@ typedef void (*GenerateMiniMapHintsFunc)(void* thisPtr, void* param, void* metho
 typedef void (*DestroyMiniMapHintByTargetFunc)(void* thisPtr, int type, void* target, bool isClearAll, void* method);
 typedef void (*DestroyAllMiniMapHintsFunc)(void* thisPtr, void* method);
 typedef void* (*MiniMapHintsCtorByTargetFunc)(void* thisPtr, int hintType, void* target, void* method);
+typedef void (*GunParticalPlayEffectFunc)(void* thisPtr, int effect, void* param, void* colliderParam, void* method);
+typedef void (*GunParticalDeleteEffectFunc)(void* thisPtr, int effect, int id, void* method);
+typedef void (*GunParticalToggleEffectFunc)(void* thisPtr, int effect, void* method);
 typedef void (*PlayWordsHintsWithTimeFunc)(void* thisPtr, void* str, float showTime, void* method);
 typedef void* (*Il2CppStringNewFunc)(const char* str);
 typedef int (*MissionCtrlGetStateFunc)(void* thisPtr, void* method);
@@ -449,6 +485,8 @@ void RunChaosTimeOnce();
 void RunChaosSpawnOnce();
 void RunChaosUIOnce();
 void RunChaosWeaponOnce();
+void RunChaosFxOnce();
+void RunKillPoliceOnlyOnce();
 void RunNpcWarFrame();
 void* ResolveBestAggressiveAimTarget(void* myCtrlPlayer);
 void* GetGameCtrlInstance();
@@ -977,6 +1015,19 @@ static float ClampMagnitudeXZ(float value, float minValue, float maxValue) {
     return value;
 }
 
+static bool HasTrailCompatiblePlayerAnchors(void* player) {
+    if (!IsProbablyValidPtr(player)) return false;
+
+    try {
+        void* gunRightHand = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x74); // Player.GunRightHand
+        void* gunMiddleFront = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x80); // Player.GunMiddleFront
+        void* head = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x3C); // Player.Head
+        return IsProbablyValidPtr(gunRightHand) || IsProbablyValidPtr(gunMiddleFront) || IsProbablyValidPtr(head);
+    } catch (...) {
+        return false;
+    }
+}
+
 static bool IsNpcWarEligibleEnemyBase(void* enemyBase, void** outPlayer, void** outPlayerBase, Vector3* outPos) {
     if (outPlayer) *outPlayer = nullptr;
     if (outPlayerBase) *outPlayerBase = nullptr;
@@ -991,9 +1042,12 @@ static bool IsNpcWarEligibleEnemyBase(void* enemyBase, void** outPlayer, void** 
     if (!IsProbablyValidPtr(player)) return false;
 
     const bool hostileHuman =
-            (baseType == EnemyNPC) &&
+            (baseType == EnemyNPC || (baseType == MissionPerson && (animalType == Sheriff || animalType == BountyHunter))) &&
+            gunID > 0 &&
+            HasTrailCompatiblePlayerAnchors(player) &&
             (animalType == Robber || animalType == Pro01 || animalType == Pro02 ||
-             animalType == Bid01 || animalType == Bid02);
+             animalType == Bid01 || animalType == Bid02 ||
+             animalType == Sheriff || animalType == BountyHunter);
     const bool hostileMonster = (baseType == Zombies || baseType == Ogre);
     const bool hostileAnimal =
             (baseType == Animal) &&
@@ -1029,8 +1083,11 @@ static bool IsPoliceWarEligiblePlayer(void* player, void** outPlayerBase, Vector
 
         int baseType = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0xC); // PlayerBaseProperty.baseType
         int animalType = *reinterpret_cast<int*>(reinterpret_cast<char*>(aiData) + 0x8); // AIdata.animalType
+        int gunID = *reinterpret_cast<int*>(reinterpret_cast<char*>(aiData) + 0x10); // AIdata.gunID
         if (baseType != MissionPerson) return false;
         if (!(animalType == Sheriff || animalType == BountyHunter)) return false;
+        if (gunID <= 0) return false;
+        if (!HasTrailCompatiblePlayerAnchors(player)) return false;
 
         Vector3 pos = {0.0f, 0.0f, 0.0f};
         if (!GetPlayerWorldPosition(player, pos)) return false;
@@ -2349,6 +2406,16 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
         pendingChaosWeapon = false;
     }
 
+    if (pendingChaosFx) {
+        RunChaosFxOnce();
+        pendingChaosFx = false;
+    }
+
+    if (pendingKillPoliceOnly) {
+        RunKillPoliceOnlyOnce();
+        pendingKillPoliceOnly = false;
+    }
+
     if (flyMode) {
         ApplyFlyMovementFrame(myCtrlPlayer);
     }
@@ -2357,6 +2424,13 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
     }
     if (npcWarMode) {
         RunNpcWarFrame();
+    }
+    if (autoClearPolice) {
+        static int autoClearPoliceFrameCounter = 0;
+        autoClearPoliceFrameCounter++;
+        if ((autoClearPoliceFrameCounter % 45) == 0) {
+            RunKillPoliceOnlyOnce();
+        }
     }
 
     ProcessGameplayHints();
@@ -2575,6 +2649,8 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("26_Button_Mostrar Todos os Policiais (15/02/2026)"),
             OBFUSCATE("27_Button_Obter Número Max de Policiais (15/02/2026)"),
             OBFUSCATE("28_Button_Obter Posição de Spawn da Polícia (15/02/2026)"),
+            OBFUSCATE("58_Button_Matar Somente Policiais (08/03/2026)"),
+            OBFUSCATE("59_Toggle_Auto Limpar Policiais (08/03/2026)"),
             
             // NPCs Especiais
             OBFUSCATE("Category_NPCs da Lei"),
@@ -2595,6 +2671,7 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("54_Button_Chaos UI (08/03/2026)"),
             OBFUSCATE("55_Button_Chaos Weapon (08/03/2026)"),
             OBFUSCATE("56_Toggle_NPC War Entre Hostis (08/03/2026)"),
+            OBFUSCATE("57_Button_Chaos FX (08/03/2026)"),
 
             // Visual do jogo
             OBFUSCATE("Category_Visual do Jogo"),
@@ -2844,6 +2921,15 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
                 }
             }
             break;
+        case 58: // Matar somente policiais
+            pendingKillPoliceOnly = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "Kill Police agendado");
+            break;
+        case 59: // Auto limpar policiais
+            autoClearPolice = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE",
+                                boolean ? "Auto limpar policiais ativado" : "Auto limpar policiais desativado");
+            break;
             
         // ========== NPCs DA LEI ==========
         case 29: // Obter instância do xerife
@@ -2925,6 +3011,10 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             } else {
                 __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "NPC War entre hostis desativado");
             }
+            break;
+        case 57: // Chaos FX
+            pendingChaosFx = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos FX agendado");
             break;
         case 36: // Criar Mission Hints Visuais
             TurnOnSceneMissionHints();
@@ -3596,6 +3686,82 @@ void RunAutoKillOnce() {
     }
 }
 
+void RunKillPoliceOnlyOnce() {
+    try {
+        uintptr_t addrBeHit = getAbsoluteAddress(targetLibName, 0x31B830); // PlayerBase.BeHit()
+        uintptr_t addrKilledAI = getAbsoluteAddress(targetLibName, 0x2812C4); // MissionCtrl.KilledAI(Player)
+        uintptr_t addrClearEnemy = getAbsoluteAddress(targetLibName, 0x280390); // MissionCtrl.ClearEnemy(Player)
+        uintptr_t addrFactoryContainPlayerBase = getAbsoluteAddress(targetLibName, 0x2E4A34); // EnemyFactory.ContainPlayerBase(PlayerBase)
+        uintptr_t addrFactoryDeletePlayerBase = getAbsoluteAddress(targetLibName, 0x2E4AB4); // EnemyFactory.DeletePlayerBase(PlayerBase)
+        uintptr_t addrEnemyGC = getAbsoluteAddress(targetLibName, 0x2E791C); // EnermyGC.EnemyGC(Player)
+        if (addrBeHit == 0) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_POLICE", "Kill Police bloqueado: BeHit indisponivel");
+            return;
+        }
+
+        auto beHit = reinterpret_cast<PlayerBaseBeHitFunc>(addrBeHit);
+        auto killedAI = reinterpret_cast<MissionCtrlPlayerActionFunc>(addrKilledAI);
+        auto clearEnemy = reinterpret_cast<MissionCtrlPlayerActionFunc>(addrClearEnemy);
+        auto factoryContainPlayerBase = reinterpret_cast<EnemyFactoryContainPlayerBaseFunc>(addrFactoryContainPlayerBase);
+        auto factoryDeletePlayerBase = reinterpret_cast<EnemyFactoryDeletePlayerBaseFunc>(addrFactoryDeletePlayerBase);
+        auto enemyGC = reinterpret_cast<EnemyGCFunc>(addrEnemyGC);
+
+        void* gameCtrl = GetGameCtrlInstance();
+        void* missionCtrl = GetMissionCtrlInstance();
+        void* enermyGC = IsProbablyValidPtr(gameCtrl) ? *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x24) : nullptr;
+        void* enemyFactory = IsProbablyValidPtr(gameCtrl) ? *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x28) : nullptr;
+
+        void* enemies[128] = {};
+        int enemyCount = CollectActiveEnemyBases(enemies, 128);
+        if (enemyCount <= 0) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_POLICE", "Kill Police bloqueado: sem inimigos armados ativos");
+            return;
+        }
+
+        int touched = 0;
+        for (int i = 0; i < enemyCount; ++i) {
+            void* playerBase = enemies[i];
+            void* player = nullptr;
+            if (!IsBulletTailCompatibleEnemyBase(playerBase, &player)) continue;
+            if (!IsProbablyValidPtr(playerBase)) continue;
+
+            void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(playerBase) + 0x14); // PlayerBase.m_dPlayerBaseData
+            if (!IsProbablyValidPtr(baseData)) continue;
+
+            void* property = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0x8); // PlayerBaseData.m_dProperty
+            if (!IsProbablyValidPtr(property)) continue;
+
+            int currentBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x14); // PlayerBaseProperty.m_dCurrentBlood
+            int maxBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x10);     // PlayerBaseProperty.m_dMaxBlood
+            if (currentBlood <= 0 || maxBlood <= 0) continue;
+
+            int lethalDamage = currentBlood + maxBlood + 5000;
+            beHit(playerBase, lethalDamage, 0, nullptr);
+            touched++;
+
+            if (IsProbablyValidPtr(missionCtrl) && addrKilledAI != 0) {
+                killedAI(missionCtrl, player, nullptr);
+            }
+            if (IsProbablyValidPtr(missionCtrl) && addrClearEnemy != 0) {
+                clearEnemy(missionCtrl, player, nullptr);
+            }
+            if (IsProbablyValidPtr(enemyFactory) && addrFactoryContainPlayerBase != 0 && addrFactoryDeletePlayerBase != 0) {
+                if (factoryContainPlayerBase(enemyFactory, playerBase, nullptr)) {
+                    factoryDeletePlayerBase(enemyFactory, playerBase, nullptr);
+                }
+            }
+            if (IsProbablyValidPtr(enermyGC) && addrEnemyGC != 0) {
+                enemyGC(enermyGC, player, nullptr);
+            }
+        }
+
+        ShowWordsHintText(touched > 0 ? "NPCS ARMADOS ELIMINADOS" : "SEM NPC ARMADO VALIDO", 2.2f);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "Kill Police tocou %d NPCs armados compativeis com trail", touched);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_POLICE", "Falha protegida em RunKillPoliceOnlyOnce");
+    }
+}
+
 static bool GetPlayerBloodInfo(void* player, int& currentBlood, int& maxBlood) {
     if (!IsProbablyValidPtr(player)) return false;
 
@@ -3812,14 +3978,7 @@ static bool IsBulletTailCompatibleEnemyBase(void* enemyBase, void** outPlayer) {
 
         void* player = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0xC); // PlayerBase.m_dPlayer
         if (!IsProbablyValidPtr(player)) return false;
-
-        // Garante que pelo menos um mount/gun transform relevante exista.
-        void* gunRightHand = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x74);
-        void* gunMiddleFront = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x80);
-        void* head = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x3C);
-        if (!IsProbablyValidPtr(gunRightHand) && !IsProbablyValidPtr(gunMiddleFront) && !IsProbablyValidPtr(head)) {
-            return false;
-        }
+        if (!HasTrailCompatiblePlayerAnchors(player)) return false;
 
         if (outPlayer) *outPlayer = player;
         return true;
@@ -4163,6 +4322,124 @@ void RunChaosUIOnce() {
         __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos UI executado");
     } catch (...) {
         __android_log_print(ANDROID_LOG_ERROR, "MOD_CHAOS", "Falha protegida no Chaos UI");
+    }
+}
+
+static void ResetChaosVisualEffects(void* effectCtrl) {
+    if (!IsProbablyValidPtr(effectCtrl)) return;
+
+    uintptr_t addrDeleteEffect = getAbsoluteAddress(targetLibName, 0x254078); // GunParticalEffectsCtrl.DeleteEffect()
+    uintptr_t addrHideEffect = getAbsoluteAddress(targetLibName, 0x25441C);   // GunParticalEffectsCtrl.HideEffect()
+    uintptr_t addrRecoverEffect = getAbsoluteAddress(targetLibName, 0x254578); // GunParticalEffectsCtrl.RecoverEffect()
+    if (addrDeleteEffect == 0 || addrHideEffect == 0 || addrRecoverEffect == 0) return;
+
+    auto deleteEffect = reinterpret_cast<GunParticalDeleteEffectFunc>(addrDeleteEffect);
+    auto hideEffect = reinterpret_cast<GunParticalToggleEffectFunc>(addrHideEffect);
+    auto recoverEffect = reinterpret_cast<GunParticalToggleEffectFunc>(addrRecoverEffect);
+
+    const int kEffectsToReset[] = {
+            (int)Effects_GunHitBlood,
+            (int)Effects_MissionMainEffect,
+            (int)Effects_MissionBranchEffect,
+            (int)Effects_QuickDrawEffect,
+            (int)Effects_DartEffect,
+            (int)Effects_DestinationEffect,
+            (int)Effects_Gunshoot_Pistol,
+            (int)Effects_Gunshoot_Rifle,
+            (int)Effects_Gunshoot_Shotgun
+    };
+
+    for (int effectType : kEffectsToReset) {
+        deleteEffect(effectCtrl, effectType, 0, nullptr);
+    }
+
+    // Pulso rápido para forçar o grupo visual a sair de estado oculto caso algum efeito antigo tenha ficado escondido.
+    hideEffect(effectCtrl, (int)Effects_Gunshoot_Shotgun, nullptr);
+    recoverEffect(effectCtrl, (int)Effects_Gunshoot_Shotgun, nullptr);
+    recoverEffect(effectCtrl, (int)Effects_MissionMainEffect, nullptr);
+}
+
+void RunChaosFxOnce() {
+    try {
+        void* effectCtrl = GetGunParticalEffectsCtrlInstance();
+        if (!IsProbablyValidPtr(effectCtrl)) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_CHAOS", "Chaos FX bloqueado: effectCtrl indisponivel");
+            return;
+        }
+
+        ResetChaosVisualEffects(effectCtrl);
+        TurnOffSceneMissionHints();
+        TurnOnSceneMissionHints();
+
+        void* sceneCtrl = GetSceneInOutPosCtrlInstance();
+        if (IsProbablyValidPtr(sceneCtrl)) {
+            uintptr_t addrDisableSceneFx = getAbsoluteAddress(targetLibName, 0x326E1C); // SceneInOutPosCtrl.DisableEffect()
+            uintptr_t addrEnableSceneFx = getAbsoluteAddress(targetLibName, 0x326F08);   // SceneInOutPosCtrl.EnableEffect()
+            if (addrDisableSceneFx != 0 && addrEnableSceneFx != 0) {
+                auto disableSceneFx = reinterpret_cast<SceneInOutToggleEffectFunc>(addrDisableSceneFx);
+                auto enableSceneFx = reinterpret_cast<SceneInOutToggleEffectFunc>(addrEnableSceneFx);
+                disableSceneFx(sceneCtrl, nullptr);
+                enableSceneFx(sceneCtrl, nullptr);
+            }
+        }
+
+        void* creator = GetPlayingUICreatorInstance();
+        if (IsProbablyValidPtr(creator)) {
+            uintptr_t addrShowHeadshoot = getAbsoluteAddress(targetLibName, 0x3C9730); // UI_PlayingUI_Creator.ShowHeadshoot()
+            uintptr_t addrShowMiniMap = getAbsoluteAddress(targetLibName, 0x3C91A0);   // UI_PlayingUI_Creator.ShowMiniMap()
+            uintptr_t addrEnableAimCenter = getAbsoluteAddress(targetLibName, 0x3C95F4); // UI_PlayingUI_Creator.EnableAimCenterUI(bool)
+            uintptr_t addrSetMissionTime = getAbsoluteAddress(targetLibName, 0x3C9B24);   // UI_PlayingUI_Creator.SetMissionTimeRegulator(float)
+            uintptr_t addrDisableMissionTime = getAbsoluteAddress(targetLibName, 0x3C9C00); // UI_PlayingUI_Creator.DisableMissitonTimeRegulator()
+            uintptr_t addrSetHorseSprintEnable = getAbsoluteAddress(targetLibName, 0x3CA03C); // UI_PlayingUI_Creator.SetHorseSprintEnable(bool)
+            uintptr_t addrSetHorseSprintValue = getAbsoluteAddress(targetLibName, 0x3CA1EC);  // UI_PlayingUI_Creator.SetCurrentHorseSprint(float)
+            if (addrShowHeadshoot != 0) {
+                auto showHeadshoot = reinterpret_cast<ShowHeadshootUIFunc>(addrShowHeadshoot);
+                showHeadshoot(creator, nullptr);
+                showHeadshoot(creator, nullptr);
+            }
+            if (addrShowMiniMap != 0) {
+                auto showMiniMap = reinterpret_cast<ShowMiniMapUIFunc>(addrShowMiniMap);
+                showMiniMap(creator, nullptr);
+            }
+            if (addrEnableAimCenter != 0) {
+                auto enableAimCenter = reinterpret_cast<EnableAimCenterUIFunc>(addrEnableAimCenter);
+                enableAimCenter(creator, true, nullptr);
+            }
+            if (addrSetMissionTime != 0) {
+                auto setMissionTime = reinterpret_cast<SetMissionTimeRegulatorFunc>(addrSetMissionTime);
+                setMissionTime(creator, 0.42f, nullptr);
+                setMissionTime(creator, 0.18f, nullptr);
+            }
+            if (addrDisableMissionTime != 0) {
+                auto disableMissionTime = reinterpret_cast<DisableMissionTimeRegulatorFunc>(addrDisableMissionTime);
+                disableMissionTime(creator, nullptr);
+            }
+            if (addrSetHorseSprintEnable != 0) {
+                auto setHorseSprintEnable = reinterpret_cast<SetHorseSprintEnableFunc>(addrSetHorseSprintEnable);
+                setHorseSprintEnable(creator, true, nullptr);
+            }
+            if (addrSetHorseSprintValue != 0) {
+                auto setHorseSprintValue = reinterpret_cast<SetCurrentHorseSprintFunc>(addrSetHorseSprintValue);
+                setHorseSprintValue(creator, 0.92f, nullptr);
+                setHorseSprintValue(creator, 1.0f, nullptr);
+            }
+        }
+
+        ClearCompleteESP();
+        RefreshTargetMarkerESP();
+        ShowTargetMarkerOnCurrentTarget();
+        RefreshMiniMapEnemyEsp();
+        RefreshCompleteESP();
+        RefreshCompleteESP();
+        ClearBulletTailNow();
+        GenerateBulletTailForAllActiveEnemies();
+        GenerateBulletTailForAllActiveEnemies();
+
+        ShowWordsHintText("CHAOS FX SEGURO", 2.2f);
+        ShowWordsHintText("PULSO VISUAL MAXIMO", 2.8f);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_CHAOS", "Chaos FX executado em modo seguro e intensificado");
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_CHAOS", "Falha protegida no Chaos FX");
     }
 }
 
