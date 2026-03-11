@@ -8,6 +8,8 @@
 
 #include "Includes/obfuscate.h"
 
+void Toast(JNIEnv *env, jobject thiz, const char *text, int length);
+
 namespace {
 constexpr size_t kDialogTextCapacity = 192;
 constexpr jint kTypePhone = 2002;
@@ -24,13 +26,30 @@ bool g_dialogPending = false;
 bool g_dialogShown = false;
 bool g_loginValidated = false;
 bool g_loginWatcherStarted = false;
+bool g_warningPending = false;
+bool g_toastPending = false;
+int g_loginGeneration = 0;
+int g_validatedGeneration = 0;
 pthread_t g_loginWatcherThread{};
 char g_dialogTitle[kDialogTextCapacity] = {0};
 char g_dialogMessage[kDialogTextCapacity] = {0};
+char g_warningTitle[kDialogTextCapacity] = {0};
+char g_warningMessage[kDialogTextCapacity] = {0};
+char g_toastMessage[kDialogTextCapacity] = {0};
 jobject g_loginDialog = nullptr;
+jobject g_warningDialog = nullptr;
 jobject g_loginUserField = nullptr;
 jobject g_loginPasswordField = nullptr;
 jobject g_dialogContext = nullptr;
+
+constexpr const char* kExpectedLoginUser = "9778";
+constexpr const char* kExpectedLoginPassword = "9778";
+
+void ClearLoginRefs(JNIEnv* env);
+void RecoverLoginState(JNIEnv* env, const char* reason);
+void ClearWarningRefs(JNIEnv* env);
+void ShowWarningDialog(JNIEnv* env, jobject context);
+bool IsDialogCurrentlyShowing(JNIEnv* env, jobject dialog);
 
 void CopyDialogText(char* destination, size_t capacity, const char* source, const char* fallback) {
     if (!destination || capacity == 0) return;
@@ -275,6 +294,23 @@ void KillGameNow(JNIEnv* env) {
     _exit(0);
 }
 
+void RecoverLoginState(JNIEnv* env, const char* reason) {
+    g_loginValidated = false;
+    g_validatedGeneration = 0;
+    g_dialogPending = true;
+    g_dialogShown = false;
+    g_warningPending = false;
+    ClearWarningRefs(env);
+    CopyDialogText(g_toastMessage, sizeof(g_toastMessage),
+                   "Usuario ou senha invalidos. Tente novamente.",
+                   "Usuario ou senha invalidos. Tente novamente.");
+    g_toastPending = true;
+    ClearLoginRefs(env);
+    __android_log_print(ANDROID_LOG_WARN, "MOD_DIALOG",
+                        "Login nao validado; dialog sera reapresentado. Motivo: %s",
+                        reason ? reason : "desconhecido");
+}
+
 void ClearLoginRefs(JNIEnv* env) {
     if (!env) return;
     if (g_loginDialog) {
@@ -289,6 +325,31 @@ void ClearLoginRefs(JNIEnv* env) {
         env->DeleteGlobalRef(g_loginPasswordField);
         g_loginPasswordField = nullptr;
     }
+}
+
+void ClearWarningRefs(JNIEnv* env) {
+    if (!env) return;
+    if (g_warningDialog) {
+        env->DeleteGlobalRef(g_warningDialog);
+        g_warningDialog = nullptr;
+    }
+}
+
+bool IsDialogCurrentlyShowing(JNIEnv* env, jobject dialog) {
+    if (!env || !dialog) return false;
+
+    jclass dialogClass = env->GetObjectClass(dialog);
+    if (!dialogClass) return false;
+
+    jmethodID isShowing = env->GetMethodID(dialogClass, OBFUSCATE("isShowing"), OBFUSCATE("()Z"));
+    if (!isShowing) return false;
+
+    jboolean showing = env->CallBooleanMethod(dialog, isShowing);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return showing == JNI_TRUE;
 }
 
 int GetOverlayWindowType(JNIEnv* env) {
@@ -425,6 +486,47 @@ jobject CreateEditText(JNIEnv* env, jobject context, const char* hint, jint inpu
     return editText;
 }
 
+void AttachWarningContent(JNIEnv* env, jobject context, jobject builder) {
+    if (!env || !context || !builder) return;
+
+    jclass linearLayoutClass = env->FindClass(OBFUSCATE("android/widget/LinearLayout"));
+    jclass builderClass = env->GetObjectClass(builder);
+    if (!linearLayoutClass || !builderClass) return;
+
+    jmethodID linearCtor = env->GetMethodID(linearLayoutClass, OBFUSCATE("<init>"),
+                                            OBFUSCATE("(Landroid/content/Context;)V"));
+    jmethodID setOrientation = env->GetMethodID(linearLayoutClass, OBFUSCATE("setOrientation"),
+                                                OBFUSCATE("(I)V"));
+    jmethodID setPadding = env->GetMethodID(linearLayoutClass, OBFUSCATE("setPadding"),
+                                            OBFUSCATE("(IIII)V"));
+    jmethodID addView = env->GetMethodID(linearLayoutClass, OBFUSCATE("addView"),
+                                         OBFUSCATE("(Landroid/view/View;)V"));
+    jmethodID setView = env->GetMethodID(builderClass, OBFUSCATE("setView"),
+                                         OBFUSCATE("(Landroid/view/View;)Landroid/app/AlertDialog$Builder;"));
+    if (!linearCtor || !setOrientation || !setPadding || !addView || !setView) return;
+
+    jobject layout = env->NewObject(linearLayoutClass, linearCtor, context);
+    if (!layout) return;
+
+    jobject badgeView = CreateTextView(env, context, "WEST AUTH", 11.0f, true);
+    jobject titleView = CreateTextView(env, context, g_warningTitle, 20.0f, true);
+    jobject messageView = CreateTextView(env, context, g_warningMessage, 14.0f, false);
+    if (!badgeView || !titleView || !messageView) return;
+
+    env->CallVoidMethod(layout, setOrientation, kLinearLayoutVertical);
+    env->CallVoidMethod(layout, setPadding, 58, 46, 58, 26);
+    ApplyRoundedBackground(env, layout, "#16110E", "#8A633B", 34.0f, 3);
+    ApplyMargins(env, layout, 0, 8, 0, 0);
+    ApplyRoundedBackground(env, badgeView, "#8A633B", "#B98A56", 24.0f, 0);
+    ApplyMargins(env, badgeView, 120, 0, 120, 18);
+    ApplyMargins(env, titleView, 0, 0, 0, 10);
+    ApplyMargins(env, messageView, 0, 0, 0, 14);
+    env->CallVoidMethod(layout, addView, badgeView);
+    env->CallVoidMethod(layout, addView, titleView);
+    env->CallVoidMethod(layout, addView, messageView);
+    env->CallObjectMethod(builder, setView, layout);
+}
+
 void AttachLoginContent(JNIEnv* env, jobject context, jobject builder) {
     if (!env || !context || !builder) return;
 
@@ -477,55 +579,90 @@ void AttachLoginContent(JNIEnv* env, jobject context, jobject builder) {
     g_loginPasswordField = env->NewGlobalRef(passwordView);
 }
 
+bool IsJavaCharSequenceEmpty(JNIEnv* env, jobject charSequence) {
+    if (!env || !charSequence) return true;
+
+    jclass textUtilsClass = env->FindClass(OBFUSCATE("android/text/TextUtils"));
+    if (!textUtilsClass) return true;
+
+    jmethodID isEmpty = env->GetStaticMethodID(textUtilsClass, OBFUSCATE("isEmpty"),
+                                               OBFUSCATE("(Ljava/lang/CharSequence;)Z"));
+    if (!isEmpty) return true;
+
+    jboolean empty = env->CallStaticBooleanMethod(textUtilsClass, isEmpty, charSequence);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return true;
+    }
+    return empty == JNI_TRUE;
+}
+
 const char* ReadEditTextValue(JNIEnv* env, jobject editText, char* buffer, size_t bufferSize) {
-    if (!env || !editText || !buffer || bufferSize == 0) return "";
+    if (!buffer || bufferSize == 0) return "";
+    buffer[0] = '\0';
+    if (!env || !editText) return buffer;
 
     jclass textViewClass = env->GetObjectClass(editText);
-    if (!textViewClass) return "";
+    if (!textViewClass) return buffer;
 
     jmethodID getText = env->GetMethodID(textViewClass, OBFUSCATE("getText"),
                                          OBFUSCATE("()Landroid/text/Editable;"));
-    if (!getText) return "";
+    if (!getText) return buffer;
 
     jobject editable = env->CallObjectMethod(editText, getText);
-    if (!editable) {
-        buffer[0] = '\0';
-        return buffer;
-    }
+    if (!editable) return buffer;
 
     jclass editableClass = env->GetObjectClass(editable);
     jmethodID toString = editableClass
                          ? env->GetMethodID(editableClass, OBFUSCATE("toString"), OBFUSCATE("()Ljava/lang/String;"))
                          : nullptr;
-    if (!toString) {
-        buffer[0] = '\0';
-        return buffer;
-    }
+    if (!toString) return buffer;
 
     jstring textValue = static_cast<jstring>(env->CallObjectMethod(editable, toString));
-    if (!textValue) {
-        buffer[0] = '\0';
+    if (!textValue) return buffer;
+
+    jclass stringClass = env->FindClass(OBFUSCATE("java/lang/String"));
+    jmethodID trim = stringClass
+                     ? env->GetMethodID(stringClass, OBFUSCATE("trim"), OBFUSCATE("()Ljava/lang/String;"))
+                     : nullptr;
+    jobject normalizedText = trim ? env->CallObjectMethod(textValue, trim) : textValue;
+    if (!normalizedText || IsJavaCharSequenceEmpty(env, normalizedText)) {
         return buffer;
     }
 
-    const char* chars = env->GetStringUTFChars(textValue, nullptr);
+    const char* chars = env->GetStringUTFChars(static_cast<jstring>(normalizedText), nullptr);
     if (!chars) {
-        buffer[0] = '\0';
         return buffer;
     }
 
     std::strncpy(buffer, chars, bufferSize - 1);
     buffer[bufferSize - 1] = '\0';
-    env->ReleaseStringUTFChars(textValue, chars);
+    env->ReleaseStringUTFChars(static_cast<jstring>(normalizedText), chars);
     return buffer;
 }
 
 bool AreCredentialsValid(JNIEnv* env) {
+    if (!env || !g_loginUserField || !g_loginPasswordField) {
+        __android_log_print(ANDROID_LOG_WARN, "MOD_DIALOG", "Validacao de login sem campos validos");
+        return false;
+    }
+
     char user[64] = {0};
     char password[64] = {0};
     ReadEditTextValue(env, g_loginUserField, user, sizeof(user));
     ReadEditTextValue(env, g_loginPasswordField, password, sizeof(password));
-    return std::strcmp(user, "9778") == 0 && std::strcmp(password, "9778") == 0;
+
+    if (user[0] == '\0' || password[0] == '\0') {
+        __android_log_print(ANDROID_LOG_WARN, "MOD_DIALOG", "Login rejeitado: usuario ou senha vazios");
+        return false;
+    }
+
+    const bool valid = std::strcmp(user, kExpectedLoginUser) == 0 &&
+                       std::strcmp(password, kExpectedLoginPassword) == 0;
+    __android_log_print(ANDROID_LOG_INFO, "MOD_DIALOG",
+                        "Resultado validacao login: valid=%d user_len=%zu pass_len=%zu gen=%d",
+                        valid ? 1 : 0, std::strlen(user), std::strlen(password), g_loginGeneration);
+    return valid;
 }
 
 void* LoginWatcherThread(void*) {
@@ -545,20 +682,20 @@ void* LoginWatcherThread(void*) {
 
         jclass dialogClass = env->GetObjectClass(g_loginDialog);
         if (!dialogClass) {
-            KillGameNow(env);
+            RecoverLoginState(env, "classe do dialog indisponivel");
             break;
         }
 
         jmethodID isShowing = env->GetMethodID(dialogClass, OBFUSCATE("isShowing"), OBFUSCATE("()Z"));
         if (!isShowing) {
-            KillGameNow(env);
+            RecoverLoginState(env, "metodo isShowing indisponivel");
             break;
         }
 
         jboolean showing = env->CallBooleanMethod(g_loginDialog, isShowing);
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
-            KillGameNow(env);
+            RecoverLoginState(env, "falha ao consultar estado do dialog");
             break;
         }
 
@@ -566,8 +703,10 @@ void* LoginWatcherThread(void*) {
             continue;
         }
 
+        const int generationAtClose = g_loginGeneration;
         if (AreCredentialsValid(env)) {
             g_loginValidated = true;
+            g_validatedGeneration = generationAtClose;
             g_dialogPending = false;
             g_dialogShown = true;
             ClearLoginRefs(env);
@@ -575,10 +714,11 @@ void* LoginWatcherThread(void*) {
             break;
         }
 
-        KillGameNow(env);
+        RecoverLoginState(env, "credenciais invalidas");
         break;
     }
 
+    g_loginWatcherStarted = false;
     g_dialogVm->DetachCurrentThread();
     return nullptr;
 }
@@ -592,8 +732,65 @@ void StartLoginWatcher(JNIEnv* env) {
     pthread_create(&g_loginWatcherThread, nullptr, LoginWatcherThread, nullptr);
 }
 
+void ShowWarningDialog(JNIEnv* env, jobject context) {
+    if (!env || !context || g_warningDialog) return;
+
+    jclass alertBuilderClass = env->FindClass(OBFUSCATE("android/app/AlertDialog$Builder"));
+    if (!alertBuilderClass) return;
+
+    jmethodID builderCtor = env->GetMethodID(alertBuilderClass, OBFUSCATE("<init>"),
+                                             OBFUSCATE("(Landroid/content/Context;)V"));
+    jobject builder = env->NewObject(alertBuilderClass, builderCtor, context);
+    if (!builder) return;
+
+    jmethodID setCancelable = env->GetMethodID(alertBuilderClass, OBFUSCATE("setCancelable"),
+                                               OBFUSCATE("(Z)Landroid/app/AlertDialog$Builder;"));
+    jmethodID setPositiveButton = env->GetMethodID(alertBuilderClass, OBFUSCATE("setPositiveButton"),
+                                                   OBFUSCATE("(Ljava/lang/CharSequence;Landroid/content/DialogInterface$OnClickListener;)Landroid/app/AlertDialog$Builder;"));
+    jmethodID create = env->GetMethodID(alertBuilderClass, OBFUSCATE("create"),
+                                        OBFUSCATE("()Landroid/app/AlertDialog;"));
+    if (!setCancelable || !setPositiveButton || !create) return;
+
+    AttachWarningContent(env, context, builder);
+    jstring okText = env->NewStringUTF("Entendi");
+    env->CallObjectMethod(builder, setCancelable, JNI_FALSE);
+    env->CallObjectMethod(builder, setPositiveButton, okText, nullptr);
+
+    jobject dialog = env->CallObjectMethod(builder, create);
+    if (!dialog) return;
+
+    ApplyOverlayWindowType(env, dialog);
+    SetDialogFlags(env, dialog);
+
+    jclass alertDialogClass = env->FindClass(OBFUSCATE("android/app/AlertDialog"));
+    if (!alertDialogClass) return;
+
+    jmethodID show = env->GetMethodID(alertDialogClass, OBFUSCATE("show"), OBFUSCATE("()V"));
+    jmethodID getButton = env->GetMethodID(alertDialogClass, OBFUSCATE("getButton"),
+                                           OBFUSCATE("(I)Landroid/widget/Button;"));
+    if (!show) return;
+
+    env->CallVoidMethod(dialog, show);
+    StyleDialogWindow(env, dialog);
+
+    if (getButton) {
+        jobject positiveButton = env->CallObjectMethod(dialog, getButton, kPositiveButtonId);
+        if (positiveButton) {
+            ApplyRoundedBackground(env, positiveButton, "#D9A35F", "#E8C18E", 24.0f, 0);
+            ApplyMargins(env, positiveButton, 24, 0, 24, 10);
+        }
+    }
+
+    ClearWarningRefs(env);
+    g_warningDialog = env->NewGlobalRef(dialog);
+    g_warningPending = false;
+}
+
 void ShowLoginDialog(JNIEnv* env, jobject context) {
     if (!env || !context) return;
+    g_loginValidated = false;
+    g_validatedGeneration = 0;
+    ++g_loginGeneration;
 
     jclass alertBuilderClass = env->FindClass(OBFUSCATE("android/app/AlertDialog$Builder"));
     if (!alertBuilderClass) return;
@@ -680,7 +877,7 @@ void ShowLoginDialog(JNIEnv* env, jobject context) {
 } // namespace
 
 bool IsDialogLoginValidated() {
-    return g_loginValidated;
+    return g_loginValidated && g_validatedGeneration != 0 && g_validatedGeneration == g_loginGeneration;
 }
 
 void RegisterDialogContext(JNIEnv* env, jobject context) {
@@ -701,10 +898,19 @@ void QueueLibLoadDialog(const char* title, const char* message) {
     g_dialogPending = true;
     g_dialogShown = false;
     g_loginValidated = false;
+    g_validatedGeneration = 0;
+    g_toastPending = false;
 }
 
 void ShowQueuedLibLoadDialog(JNIEnv* env, jobject context) {
-    if (!g_dialogPending || g_loginValidated || !env || !context) return;
+    if (!env || !context) return;
+
+    if (g_toastPending) {
+        Toast(env, context, g_toastMessage, 1);
+        g_toastPending = false;
+    }
+
+    if (!g_dialogPending || g_loginValidated) return;
     if (g_loginDialog) return;
 
     ShowLoginDialog(env, context);
@@ -715,4 +921,9 @@ void ShowQueuedLibLoadDialog(JNIEnv* env, jobject context) {
     }
 
     __android_log_print(ANDROID_LOG_INFO, "MOD_DIALOG", "Dialog de login exibido");
+}
+
+void ShowQueuedLibLoadDialogWithRegisteredContext(JNIEnv* env) {
+    if (!env || !g_dialogContext) return;
+    ShowQueuedLibLoadDialog(env, g_dialogContext);
 }

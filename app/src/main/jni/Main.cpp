@@ -1923,6 +1923,17 @@ void *hack_thread(void *) {
 
     LOGI(OBFUSCATE("%s foi carregada"), (const char *) targetLibName);
 
+    int loginHintTick = 0;
+    while (!IsDialogLoginValidated()) {
+        ++loginHintTick;
+        if (isLibraryLoaded(targetLibName) && (loginHintTick % 15) == 0) {
+            ShowWordsHintText("FACA LOGIN PARA LIBERAR O MENU", 2.4f);
+        }
+        usleep(200000);
+    }
+
+    __android_log_print(ANDROID_LOG_INFO, "MOD_DIALOG", "Login validado; liberando instalacao dos hooks");
+
 #if defined(__aarch64__) // Código para arquitetura ARM64
     // Hooks para ARM64 seriam definidos aqui
 
@@ -1968,6 +1979,8 @@ void *hack_thread(void *) {
  */
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     jobjectArray ret;
+
+    ShowQueuedLibLoadDialog(env, context);
 
     const char *features[] = {
             // Recursos originais
@@ -2045,6 +2058,8 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
              jint featNum, jstring featName, jint value,
              jboolean boolean, jstring str) {
     if (!IsDialogLoginValidated()) {
+        RegisterDialogContext(env, obj);
+        ShowQueuedLibLoadDialog(env, obj);
         __android_log_print(ANDROID_LOG_WARN, "MOD_DIALOG", "Mudanca ignorada antes do login: %d", featNum);
         return;
     }
