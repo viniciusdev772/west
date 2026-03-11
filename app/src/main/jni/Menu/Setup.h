@@ -1,6 +1,7 @@
 #include <sstream>
 #include "Menu/Menu.h"
 #include "Menu/get_device_api_level_inlines.h"
+#include "../DialogOnLoad.h"
 #include <curl/curl.h>
 using namespace std;
 struct MemoryStruct {
@@ -420,46 +421,13 @@ void CheckOverlayPermission(JNIEnv *env, jclass thiz, jobject ctx){
 }
 
 void Init(JNIEnv *env, jobject thiz, jobject ctx, jobject title, jobject subtitle){
-    //Set sub title
-    jobject bemvindo = readFile(env, ctx, env->NewStringUTF("boasvindas.txt"));
-    const char *text = env->GetStringUTFChars((jstring)bemvindo, NULL);
-    setText(env, title, text);
+    RegisterDialogContext(env, ctx);
+    ShowQueuedLibLoadDialog(env, ctx);
 
-    env->ReleaseStringUTFChars((jstring)bemvindo, text);
-
-    //Set sub title
+    setText(env, title, OBFUSCATE("West Gunfighter"));
     setText(env, subtitle, OBFUSCATE("<b><marquee><p style=\"font-size:30\">"
                                      "<p style=\"color:green;\">Mod by Vdev</p> "
                                      "</marquee></b>"));
-
-    std::string url = "https://remotelibrary.viniciusdev.com.br/versao.txt";
-    std::string serverVersion = getVersion(url);
-    jstring fileVersionJString = readFile(env, ctx, env->NewStringUTF("versao.txt"));
-    const char* fileVersionCStr = env->GetStringUTFChars(fileVersionJString, nullptr);
-    std::string fileVersion(fileVersionCStr);
-    env->ReleaseStringUTFChars(fileVersionJString, fileVersionCStr);
-
-    if (serverVersion == fileVersion) {
-        setText(env, subtitle, OBFUSCATE("<b><marquee><p style=\"font-size:30\">"
-                                         "<p style=\"color:green;\">Mod by Vdev</p> "
-                                         "</marquee></b>"));
-    }else{
-        setText(env, subtitle, OBFUSCATE("<b><marquee><p style=\"font-size:70\">"
-                                         "<p style=\"color:red;\">Atualize seu Mod !!</p> "
-                                         "</marquee></b>"));
-    }
-
-
-
-
-
-
-
-
-
-
-
-
     //Dialog Example
     //setDialog(ctx, env, OBFUSCATE("Dialog da Lib"), OBFUSCATE("Lib carregada Versão 1.1.1"));
 
@@ -467,13 +435,6 @@ void Init(JNIEnv *env, jobject thiz, jobject ctx, jobject title, jobject subtitl
     //Toast(env, ctx, OBFUSCATE("Modded by VDEV"), ToastLength::LENGTH_LONG);
     //Toast(env, ctx, OBFUSCATE("lib version 1.0"), ToastLength::LENGTH_LONG);
     //Toast(env, ctx, OBFUSCATE("lib version 1.0"), ToastLength::LENGTH_LONG);
-
-
-
-
-    ///readFile(JNIEnv *env, jobject ctx, jstring filename)
-
-
 
     std::string username = "9778";
     std::string password = "9778";

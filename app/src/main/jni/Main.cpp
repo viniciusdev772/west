@@ -11,6 +11,7 @@
 #include "Includes/obfuscate.h"
 #include "Includes/Utils.h"
 #include "KittyMemory/MemoryPatch.h"
+#include "DialogOnLoad.h"
 #include "Menu/Setup.h"
 
 // Define o nome da biblioteca alvo
@@ -64,16 +65,6 @@ enum DropGoodsType {
 // ===============================================================================
 
 bool Health = false;
-bool debugEnemyPos = false;
-bool infiniteGold = false;
-bool infiniteAmmo = false;
-bool infiniteHealth = false;
-bool infiniteResources = false;
-bool playerOnHorse = false;
-bool instantReload = false;
-bool speedHack = false;
-bool autoAim = false;
-bool aimBot = false;                 // 🎯 AimBot Inteligente - caça inimigos automaticamente
 bool aimBotAggressive = false;       // ⚡ Aimbot agressivo (mais tentativas por frame)
 bool alwaysHeadshot = false;         // 💀 Força todos os tiros como headshot
 bool flyMode = false;                // 🕊️ Modo voo experimental
@@ -85,16 +76,12 @@ bool bulletTailEsp = false;          // 🔫 Desenha trilhas de tiro em NPCs arm
 bool minimapEnemyEsp = false;        // 🗺️ ESP de inimigos no minimapa
 bool autoClearPolice = false;        // 🚔 Limpa policiais continuamente
 int sliderValue = 1, Moedas = 0, Gems = 0;
-float speedMultiplier = 1.0f;
 float flyVerticalSpeed = 5.0f;
 float flyHeightStep = 1.0f;
 float npcFlyLift = 1.2f;
 void* npcFlightTargetPlayer = nullptr;
 
 // Ações pendentes para execução em contexto de jogo
-volatile bool pendingGeneratePolice = false;
-volatile bool pendingHidePolice = false;
-volatile bool pendingShowPolice = false;
 volatile bool pendingCreateMissionHints = false;
 volatile bool pendingDestroyMissionHints = false;
 volatile bool pendingEspRefresh = false;
@@ -382,7 +369,6 @@ typedef void (*UpdateAimTargetFunc)(void* thisPtr);
 typedef void (*SetAimStateFunc)(void* thisPtr, AimTargetState state, void* target, bool forceTarget);
 
 // ========== TIPOS DE FUNÇÃO PARA SISTEMA POLICIAL ==========
-typedef void* (*GetNPCenemyOriDataFunc)(int ID);
 typedef int (*GetPoliceMaxNumFunc)(void* method);
 typedef void (*GeneratePoliceFunc)(void* thisPtr, void* method);
 typedef Vector3 (*GetPoliceBurnPosFunc)(void* thisPtr, Vector3 playerPos, float minSqr, float maxSqr);
@@ -436,15 +422,8 @@ typedef bool (*PropertyAddCanAttackLayerFunc)(void* thisPtr, void* targetGameObj
 void CallSetAimState(void* playerCtrl, AimTargetState state, void* target, bool forceTarget);
 
 // ========== DECLARAÇÕES ANTECIPADAS - SISTEMA POLICIAL ==========
-void* GetNPCenemyOriData(int ID);
-int GetPoliceMaxNum();
 void GeneratePolice(void* missionCtrl);
-Vector3 GetPoliceBurnPos(void* enemyPosCtrl, Vector3 playerPos, float minSqr, float maxSqr);
-void HideAllPolice(void* missionCtrl);
-void ShowAllPolice(void* missionCtrl);
 void* GetMissionCtrlInstance();
-void* GetSheriffInstance();
-void* GetBountyHunterInstance();
 void* GetSceneInOutPosCtrlInstance();
 void CreateMissionHints();
 void DestroyMissionHints();
@@ -459,7 +438,6 @@ void HideTargetMarker();
 bool CanEnableCompleteESP();
 void RefreshCompleteESP();
 void ClearCompleteESP();
-void LogTrackedEntities();
 bool CanRunAutoKill();
 int CollectActiveEnemyBases(void** outEnemies, int maxEnemies);
 void RunAutoKillOnce();
@@ -1512,58 +1490,6 @@ void ApplyEnemyFlyMovementFrame() {
 }
 
 /**
- * Coloca o jogador no cavalo usando o estado do jogo (MÉTODO SEGURO)
- */
-void CallSetPlayerOnHorse() {
-    try {
-        // Usando GetOnHorse.get_Instance() que é mais seguro - offset: 0x4654C4
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x4654C4);
-        if (baseAddress == 0) {
-            __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Erro: Endereço inválido para GetOnHorse.get_Instance");
-            return;
-        }
-        
-        auto getOnHorseInstance = reinterpret_cast<GetOnHorseInstanceFunc>(baseAddress);
-        void* horseStateInstance = getOnHorseInstance();
-        
-        if (horseStateInstance) {
-            __android_log_print(ANDROID_LOG_INFO, "ModMenu", "🐎 Estado GetOnHorse ativado - Jogador montará no cavalo");
-            // O estado do jogo se encarregará de montar no cavalo de forma segura
-        } else {
-            __android_log_print(ANDROID_LOG_WARN, "ModMenu", "Aviso: Instância GetOnHorse não disponível");
-        }
-    } catch (...) {
-        __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Exceção em CallSetPlayerOnHorse");
-    }
-}
-
-/**
- * Remove o jogador do cavalo usando o estado do jogo (MÉTODO SEGURO)
- */
-void CallSetPlayerOffHorse() {
-    try {
-        // Usando GetOffHorse.get_Instance() que é mais seguro - offset: 0x465150
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x465150);
-        if (baseAddress == 0) {
-            __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Erro: Endereço inválido para GetOffHorse.get_Instance");
-            return;
-        }
-        
-        auto getOffHorseInstance = reinterpret_cast<GetOffHorseInstanceFunc>(baseAddress);
-        void* horseStateInstance = getOffHorseInstance();
-        
-        if (horseStateInstance) {
-            __android_log_print(ANDROID_LOG_INFO, "ModMenu", "🐎 Estado GetOffHorse ativado - Jogador desmontará do cavalo");
-            // O estado do jogo se encarregará de desmontar do cavalo de forma segura
-        } else {
-            __android_log_print(ANDROID_LOG_WARN, "ModMenu", "Aviso: Instância GetOffHorse não disponível");
-        }
-    } catch (...) {
-        __android_log_print(ANDROID_LOG_ERROR, "ModMenu", "Exceção em CallSetPlayerOffHorse");
-    }
-}
-
-/**
  * Força atualização do alvo de mira (com verificação de segurança)
  * @param playerCtrl Ponteiro para o controlador do jogador
  */
@@ -1596,93 +1522,7 @@ void CallSetAimState(void* playerCtrl, AimTargetState state, void* target, bool 
     setAimState(playerCtrl, state, target, forceTarget);
 }
 
-/**
- * Obtém instância do controlador de posições de inimigos
- * @return Ponteiro para EnemyPosCtrl ou nullptr
- */
-void* GetEnemyPosCtrlInstance() {
-    try {
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x2E66C4); // EnemyPosCtrl.GetInstance()
-        if (baseAddress == 0) {
-            __android_log_print(ANDROID_LOG_ERROR, "MOD_AIMBOT", "Erro: Endereço inválido para EnemyPosCtrl.GetInstance");
-            return nullptr;
-        }
-        
-        auto getEnemyPosCtrlInstance = reinterpret_cast<EnemyPosCtrlGetInstanceFunc>(baseAddress);
-        void* enemyPosCtrl = getEnemyPosCtrlInstance(nullptr);
-        
-        if (enemyPosCtrl) {
-            __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIMBOT", "EnemyPosCtrl obtido com sucesso: %p", enemyPosCtrl);
-        }
-        
-        return enemyPosCtrl;
-    } catch (...) {
-        __android_log_print(ANDROID_LOG_ERROR, "MOD_AIMBOT", "Exceção ao obter EnemyPosCtrl");
-        return nullptr;
-    }
-}
-
 // ========== IMPLEMENTAÇÃO DO SISTEMA POLICIAL ==========
-
-/**
- * Obtém dados de origem de NPCs inimigos (inclui polícia)
- * PROTEÇÃO ANTI-CRASH: Verificações rigorosas de segurança
- */
-void* GetNPCenemyOriData(int ID) {
-    // Validação de entrada
-    if (ID < 0 || ID > 1000) return nullptr; // IDs válidos esperados
-    
-    try {
-        // Verifica se a biblioteca está carregada
-        if (!isLibraryLoaded(targetLibName)) return nullptr;
-        
-        // dump.cs: PoliceLoader.GetNPCenemyOriData(int ID) -> RVA 0x31EDF0
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x31EDF0);
-        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return nullptr;
-        
-        // Verificação adicional de validade do endereço
-        if (baseAddress < 0x10000000) return nullptr; // Endereço muito baixo
-        
-        auto getNPCEnemyOriData = reinterpret_cast<GetNPCenemyOriDataFunc>(baseAddress);
-        if (!getNPCEnemyOriData) return nullptr;
-        
-        return getNPCEnemyOriData(ID);
-    } catch (const std::exception& e) {
-        return nullptr;
-    } catch (...) {
-        return nullptr;
-    }
-}
-
-/**
- * Obtém número máximo de policiais permitidos
- * PROTEÇÃO ANTI-CRASH: Retorna valor seguro em caso de erro
- */
-int GetPoliceMaxNum() {
-    try {
-        // Verifica se a biblioteca está carregada
-        if (!isLibraryLoaded(targetLibName)) return 5; // Valor padrão seguro
-        
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x53A5A0);
-        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return 5;
-        
-        // Verificação de validade do endereço
-        if (baseAddress < 0x10000000) return 5;
-        
-        auto getPoliceMaxNum = reinterpret_cast<GetPoliceMaxNumFunc>(baseAddress);
-        if (!getPoliceMaxNum) return 5;
-        
-        int result = getPoliceMaxNum(nullptr);
-        // Validação do resultado (valores razoáveis)
-        if (result < 0 || result > 100) return 5;
-        
-        return result;
-    } catch (const std::exception& e) {
-        return 5; // Valor padrão seguro
-    } catch (...) {
-        return 5; // Valor padrão seguro
-    }
-}
 
 /**
  * Gera/spawna policiais no jogo
@@ -1715,183 +1555,6 @@ void GeneratePolice(void* missionCtrl) {
         // Exceção capturada - não faz nada
     } catch (...) {
         // Qualquer exceção - não faz nada
-    }
-}
-
-/**
- * Obtém posição de spawn da polícia baseada na posição do jogador
- * PROTEÇÃO ANTI-CRASH: Usa offset real 0x2E6B40 com validações completas
- */
-Vector3 GetPoliceBurnPos(void* enemyPosCtrl, Vector3 playerPos, float minSqr, float maxSqr) {
-    Vector3 defaultPos = {0.0f, 0.0f, 0.0f};
-    
-    // Verificação de ponteiro nulo
-    if (!enemyPosCtrl) return defaultPos;
-    
-    // Verificação de validade do ponteiro
-    if ((uintptr_t)enemyPosCtrl < 0x10000000) return defaultPos;
-    
-    // Validação dos parâmetros de entrada
-    if (minSqr < 0.0f || maxSqr < 0.0f || minSqr > maxSqr) return defaultPos;
-    if (minSqr > 1000.0f || maxSqr > 1000.0f) return defaultPos; // Limites razoáveis
-    
-    try {
-        // Verifica se a biblioteca está carregada
-        if (!isLibraryLoaded(targetLibName)) return defaultPos;
-        
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x2E6B40); // Offset real
-        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return defaultPos;
-        
-        // Verificação de validade do endereço
-        if (baseAddress < 0x10000000) return defaultPos;
-        
-        auto getPoliceBurnPos = reinterpret_cast<GetPoliceBurnPosFunc>(baseAddress);
-        if (!getPoliceBurnPos) return defaultPos;
-        
-        Vector3 result = getPoliceBurnPos(enemyPosCtrl, playerPos, minSqr, maxSqr);
-        
-        // Validação do resultado (posições razoáveis)
-        if (result.x < -10000.0f || result.x > 10000.0f) return defaultPos;
-        if (result.y < -10000.0f || result.y > 10000.0f) return defaultPos;
-        if (result.z < -10000.0f || result.z > 10000.0f) return defaultPos;
-        
-        return result;
-    } catch (const std::exception& e) {
-        return defaultPos;
-    } catch (...) {
-        return defaultPos;
-    }
-}
-
-/**
- * Oculta todos os NPCs e policiais
- * PROTEÇÃO ANTI-CRASH: Múltiplas camadas de verificação
- */
-void HideAllPolice(void* missionCtrl) {
-    // Verificação de ponteiro nulo
-    if (!missionCtrl) return;
-    
-    // Verificação de validade do ponteiro
-    if ((uintptr_t)missionCtrl < 0x10000000) return;
-    
-    try {
-        // Verifica se a biblioteca está carregada
-        if (!isLibraryLoaded(targetLibName)) return;
-        
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x278038);
-        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return;
-        
-        // Verificação de validade do endereço
-        if (baseAddress < 0x10000000) return;
-        
-        auto hideNonNpcAndPolice = reinterpret_cast<HideNonNpcAndPoliceFunc>(baseAddress);
-        if (!hideNonNpcAndPolice) return;
-        
-        hideNonNpcAndPolice(missionCtrl, nullptr);
-        
-    } catch (const std::exception& e) {
-        // Exceção capturada - operação falhou silenciosamente
-    } catch (...) {
-        // Qualquer exceção - operação falhou silenciosamente
-    }
-}
-
-/**
- * Mostra/recupera todos os NPCs e policiais
- * PROTEÇÃO ANTI-CRASH: Múltiplas camadas de verificação
- */
-void ShowAllPolice(void* missionCtrl) {
-    // Verificação de ponteiro nulo
-    if (!missionCtrl) return;
-    
-    // Verificação de validade do ponteiro
-    if ((uintptr_t)missionCtrl < 0x10000000) return;
-    
-    try {
-        // Verifica se a biblioteca está carregada
-        if (!isLibraryLoaded(targetLibName)) return;
-        
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x27B5DC);
-        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return;
-        
-        // Verificação de validade do endereço
-        if (baseAddress < 0x10000000) return;
-        
-        auto recoverNonNpcAndPolice = reinterpret_cast<RecoverNonNpcAndPoliceFunc>(baseAddress);
-        if (!recoverNonNpcAndPolice) return;
-        
-        recoverNonNpcAndPolice(missionCtrl, nullptr);
-        
-    } catch (const std::exception& e) {
-        // Exceção capturada - operação falhou silenciosamente
-    } catch (...) {
-        // Qualquer exceção - operação falhou silenciosamente
-    }
-}
-
-/**
- * Obtém instância do xerife
- * PROTEÇÃO ANTI-CRASH: Singleton pattern seguro
- */
-void* GetSheriffInstance() {
-    try {
-        // Verifica se a biblioteca está carregada
-        if (!isLibraryLoaded(targetLibName)) return nullptr;
-        
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x486D8C);
-        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return nullptr;
-        
-        // Verificação de validade do endereço
-        if (baseAddress < 0x10000000) return nullptr;
-        
-        auto getSheriffInstance = reinterpret_cast<GetNpcSheriffInstanceFunc>(baseAddress);
-        if (!getSheriffInstance) return nullptr;
-        
-        void* instance = getSheriffInstance(nullptr);
-        
-        // Verificação do resultado (instância válida)
-        if (instance && (uintptr_t)instance >= 0x10000000) {
-            return instance;
-        }
-        
-        return nullptr;
-    } catch (const std::exception& e) {
-        return nullptr;
-    } catch (...) {
-        return nullptr;
-    }
-}
-
-/**
- * Obtém instância do caçador de recompensas
- * PROTEÇÃO ANTI-CRASH: Singleton pattern seguro
- */
-void* GetBountyHunterInstance() {
-    try {
-        // Verifica se a biblioteca está carregada
-        if (!isLibraryLoaded(targetLibName)) return nullptr;
-        
-        uintptr_t baseAddress = getAbsoluteAddress(targetLibName, 0x487098);
-        if (baseAddress == 0 || baseAddress == (uintptr_t)-1) return nullptr;
-        
-        // Verificação de validade do endereço
-        if (baseAddress < 0x10000000) return nullptr;
-        
-        auto getBountyHunterInstance = reinterpret_cast<GetNpcBountyHunterInstanceFunc>(baseAddress);
-        if (!getBountyHunterInstance) return nullptr;
-        
-        void* instance = getBountyHunterInstance(nullptr);
-        
-        // Verificação do resultado (instância válida)
-        if (instance && (uintptr_t)instance >= 0x10000000) {
-            return instance;
-        }
-        
-        return nullptr;
-    } catch (const std::exception& e) {
-        return nullptr;
-    } catch (...) {
-        return nullptr;
     }
 }
 
@@ -1962,7 +1625,7 @@ int (*original_GetHitBlood)(void *thisPtr, int part, int type, Vector3 enemy, Ve
 
 /**
  * Hook para a função GetHitBlood
- * Modifica o dano causado pelas balas (com verificações de segurança)
+ * Força o cálculo como headshot quando a feature estiver ativa.
  */
 int hook_GetHitBlood(void *thisPtr, int part, int type, Vector3 enemy, Vector3 myPosition, int modelType) {
     // Verificação de segurança para evitar crashes
@@ -1970,190 +1633,29 @@ int hook_GetHitBlood(void *thisPtr, int part, int type, Vector3 enemy, Vector3 m
         __android_log_print(ANDROID_LOG_ERROR, "MOD", "Erro: thisPtr é nulo em GetHitBlood");
         return 1; // Retorna dano mínimo
     }
-    
-    __android_log_print(ANDROID_LOG_DEBUG, "MOD", "Entrada na função GetHitBlood");
-    int result = original_GetHitBlood(thisPtr, part, type, enemy, myPosition, modelType);
-    
-    // Se alwaysHeadshot estiver ativo e for parte da cabeça, aumenta o dano
-    if (alwaysHeadshot && part == 0) { // Assumindo que 0 = cabeça
-        result = sliderValue * 2; // Dano de headshot
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD", "Headshot forçado! Dano: %d", result);
-    } else {
-        result = sliderValue;
+
+    constexpr int kColliderBodyPartHead = 0; // dump.cs: ColliderBodyParts.Head = 0
+    int resolvedPart = alwaysHeadshot ? kColliderBodyPartHead : part;
+
+    if (alwaysHeadshot && part != kColliderBodyPartHead) {
+        __android_log_print(ANDROID_LOG_DEBUG, "MOD", "Redirecionando hit para Head (part=%d -> %d)", part,
+                            resolvedPart);
     }
-    
+
+    int result = original_GetHitBlood(thisPtr, resolvedPart, type, enemy, myPosition, modelType);
+
+    if (sliderValue > 1) {
+        result = alwaysHeadshot ? (sliderValue * 2) : sliderValue;
+    }
+
     __android_log_print(ANDROID_LOG_DEBUG, "MOD", "Dano final: %d", result);
     return result;
 }
-
-// ================ HOOKS PARA SISTEMA DE POSIÇÃO DE INIMIGOS =================
-
-// Ponteiro para função original GetEnemyBurnPos
-Vector3 (*original_GetEnemyBurnPos)(void* thisPtr, int modelBonesType, int scenePosType);
-
-/**
- * Hook para a função GetEnemyBurnPos
- * Monitora e loga as posições de inimigos
- */
-Vector3 hook_GetEnemyBurnPos(void* thisPtr, int modelBonesType, int scenePosType) {
-    // Obtem o resultado original
-    Vector3 result = original_GetEnemyBurnPos(thisPtr, modelBonesType, scenePosType);
-
-    // Se o debug estiver ativado, registra os valores no log
-    if (debugEnemyPos) {
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_DEBUG",
-                            "GetEnemyBurnPos: ModelBonesType=%d, ScenePosType=%d, Position=(%.2f, %.2f, %.2f)",
-                            modelBonesType, scenePosType, result.x, result.y, result.z);
-    }
-
-    // Retorna o resultado original sem modificação
-    return result;
-}
-
-// Ponteiro para função original GetPoliceBurnPos
-Vector3 (*original_GetPoliceBurnPos)(void* thisPtr, Vector3 playerPos, float minSqr, float maxSqr);
-
-/**
- * Hook para a função GetPoliceBurnPos
- * Monitora e loga as posições de policiais
- */
-Vector3 hook_GetPoliceBurnPos(void* thisPtr, Vector3 playerPos, float minSqr, float maxSqr) {
-    // Obtem o resultado original
-    Vector3 result = original_GetPoliceBurnPos(thisPtr, playerPos, minSqr, maxSqr);
-
-    // Se o debug estiver ativado, registra os valores no log
-    if (debugEnemyPos) {
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_DEBUG",
-                            "GetPoliceBurnPos: PlayerPos=(%.2f, %.2f, %.2f), MinSqr=%.2f, MaxSqr=%.2f, Result=(%.2f, %.2f, %.2f)",
-                            playerPos.x, playerPos.y, playerPos.z, minSqr, maxSqr, result.x, result.y, result.z);
-    }
-
-    // Retorna o resultado original sem modificação
-    return result;
-}
-
-// Ponteiro para função original ClearHasEnemy
-void (*original_ClearHasEnemy)(void* thisPtr);
-
-/**
- * Hook para a função ClearHasEnemy
- * Monitora quando os inimigos são limpos
- */
-void hook_ClearHasEnemy(void* thisPtr) {
-    // Log da chamada
-    if (debugEnemyPos) {
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_DEBUG", "ClearHasEnemy foi chamado - Removendo inimigos");
-    }
-
-    // Chama a função original sem modificação
-    original_ClearHasEnemy(thisPtr);
-}
-
-// Ponteiro para função original HasScenePosType
-bool (*original_HasScenePosType)(void* thisPtr, int scenePosType);
-
-/**
- * Hook para a função HasScenePosType
- * Monitora verificações de posições disponíveis
- */
-bool hook_HasScenePosType(void* thisPtr, int scenePosType) {
-    bool result = original_HasScenePosType(thisPtr, scenePosType);
-
-    if (debugEnemyPos) {
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_DEBUG",
-                            "HasScenePosType: ScenePosType=%d, Result=%s",
-                            scenePosType, result ? "true" : "false");
-    }
-
-    return result;
-}
-
-// ================ HOOKS PARA SISTEMA DE ITENS DO JOGO =================
-
-// Ponteiro para função original GetDropGoodNumber
-int (*original_GetDropGoodNumber)(int goodType);
-
-/**
- * Hook para a função GetDropGoodNumber
- * Modifica a quantidade de itens retornada
- */
-int hook_GetDropGoodNumber(int goodType) {
-    DropGoodsType type = (DropGoodsType)goodType;
-
-    if (debugEnemyPos) {
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_ITEMS", "GetDropGoodNumber solicitado: Tipo=%d", goodType);
-    }
-
-    // Se o hack de recursos infinitos estiver ativado, retorna um valor alto para certos itens
-    if (infiniteResources) {
-        // Retorna valor alto para todos os recursos (peles, partes, etc)
-        if (type >= DeerSkin && type <= GunPart4) {
-            return 999;
-        }
-    }
-
-    // Se estiver com hack de ouro/diamantes ativado
-    if (infiniteGold && (type == Gold || type == Diamond)) {
-        return 9999;
-    }
-
-    // Se estiver com hack de munição ativado
-    if (infiniteAmmo && (type == PistolAmmo || type == ShotgunAmmo || type == RifleAmmo)) {
-        return 9999;
-    }
-
-    // Se estiver com hack de vida ativado (via itens)
-    if (infiniteHealth && (type == BloodVial || type == BigBloodVial)) {
-        return 999;
-    }
-
-    // Caso contrário, chama a função original
-    return original_GetDropGoodNumber(goodType);
-}
-
-// Ponteiro para função original SetDropGoodNumber
-void (*original_SetDropGoodNumber)(int goodType, int num);
-
-// Ponteiros para funções de recarga
-float (*original_GetReloadTime)(void* thisPtr);
 
 // Ponteiros para funções de mira
 void (*original_UpdateAimTarget)(void* thisPtr);
 void (*original_SetAimState)(void* thisPtr, AimTargetState state, void* target, bool forceTarget);
 void (*original_MyCtrlPlayerMyUpdate)(void* thisPtr);
-
-/**
- * Hook para a função SetDropGoodNumber
- * Monitora quando a quantidade de itens é alterada
- */
-void hook_SetDropGoodNumber(int goodType, int num) {
-    if (debugEnemyPos) {
-        const char* itemNames[] = {
-                "Null", "BloodVial", "BigBloodVial", "PistolAmmo", "ShotgunAmmo",
-                "RifleAmmo", "DeerSkin", "CheetahSkin", "BearSkin", "WolfSkin",
-                "FoxSkin", "GunPart1", "GunPart2", "GunPart3", "GunPart4",
-                "WHISKY", "Gold", "Diamond"
-        };
-        
-
-        const char* itemName = "Desconhecido";
-        if (goodType >= 0 && goodType < 18) {
-            itemName = itemNames[goodType];
-        }
-
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_ITEMS",
-                            "SetDropGoodNumber: Item=%s (Tipo=%d), Quantidade=%d",
-                            itemName, goodType, num);
-    }
-
-    // Chama a função original
-    original_SetDropGoodNumber(goodType, num);
-}
-
-// ================ HOOKS PARA VELOCIDADE CORRIGIDOS =================
-
-// Ponteiros para funções originais (removendo as inexistentes)
-MyPlayerOriData* (*original_GetMyPlayerOriData)();
 
 /**
  * Obtém os dados de origem do jogador (incluindo velocidades)
@@ -2184,81 +1686,6 @@ MyPlayerOriData* GetPlayerOriData() {
 }
 
 /**
- * Hook para a função GetMyPlayerOriData
- * Modifica as velocidades quando o hack está ativado
- */
-MyPlayerOriData* hook_GetMyPlayerOriData() {
-    MyPlayerOriData* data = original_GetMyPlayerOriData();
-    if (!data) return nullptr;
-
-    // Aplica hack de velocidade SEMPRE que os dados são acessados
-    if (speedHack) {
-        // Valores base do jogo (descobertos através de testes)
-        static const float BASE_WALK = 2.0f;
-        static const float BASE_RUN = 4.0f;
-        
-        // Força valores multiplicados TODA VEZ que é chamado
-        data->walk_speed = BASE_WALK * speedMultiplier;
-        data->run_speed = BASE_RUN * speedMultiplier;
-        data->acc = 10.0f * speedMultiplier;  // Aceleração alta
-        data->dec = 5.0f;  // Desaceleração normal
-    }
-
-    // Processa ações pendentes em contexto de jogo
-    if (pendingGeneratePolice || pendingHidePolice || pendingShowPolice ||
-        pendingCreateMissionHints || pendingDestroyMissionHints) {
-        void* missionCtrl = GetMissionCtrlInstance();
-        if (missionCtrl) {
-            if (pendingGeneratePolice) {
-                GeneratePolice(missionCtrl);
-                pendingGeneratePolice = false;
-            }
-            if (pendingHidePolice) {
-                HideAllPolice(missionCtrl);
-                pendingHidePolice = false;
-            }
-            if (pendingShowPolice) {
-                ShowAllPolice(missionCtrl);
-                pendingShowPolice = false;
-            }
-        }
-
-        if (pendingCreateMissionHints) {
-            CreateMissionHints();
-            pendingCreateMissionHints = false;
-        }
-
-        if (pendingDestroyMissionHints) {
-            DestroyMissionHints();
-            pendingDestroyMissionHints = false;
-        }
-    }
-
-    // Modo voo experimental:
-    // a movimentação vertical é aplicada imediatamente pelos sliders (cases 33/34),
-    // evitando conflito com locomoção normal.
-
-    return data;
-}
-
-/**
- * Hook para a função GetReloadTime
- * Modifica o tempo de recarga das armas
- */
-float hook_GetReloadTime(void* thisPtr) {
-    float originalTime = original_GetReloadTime(thisPtr);
-    
-    if (instantReload) {
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_RELOAD", "Recarga instantânea ativada");
-        return 0.1f; // Tempo mínimo para evitar bugs
-    }
-    
-    return originalTime;
-}
-
-
-
-/**
  * Hook para a função UpdateAimTarget
  * SISTEMA AIMBOT V5: Busca agressiva com offsets reais do dump.cs
  */
@@ -2267,8 +1694,8 @@ void hook_UpdateAimTarget(void* thisPtr) {
     
     // Chama a função original primeiro
     original_UpdateAimTarget(thisPtr);
-    
-    if (!autoAim && !aimBot && !aimBotAggressive) return;
+
+    if (!aimBotAggressive) return;
 
     // Primeiro tenta o alvo já resolvido pelo jogo.
     void* bestTarget = FindBestTarget(thisPtr);
@@ -2276,24 +1703,21 @@ void hook_UpdateAimTarget(void* thisPtr) {
         bestTarget = nullptr;
     }
 
-    // Modo agressivo: mantém o fluxo antigo que funcionava e adiciona fallback nativo.
-    if (aimBotAggressive) {
-        static int aggressiveFrameCounter = 0;
-        aggressiveFrameCounter++;
+    static int aggressiveFrameCounter = 0;
+    aggressiveFrameCounter++;
 
-        if (!bestTarget || (aggressiveFrameCounter % 2) == 0) {
-            ForceAimRefresh(thisPtr);
-            original_UpdateAimTarget(thisPtr);
-            original_UpdateAimTarget(thisPtr);
-            bestTarget = FindBestTarget(thisPtr);
-            if (IsProbablyValidPtr(bestTarget) && !CanAttackTargetTransform(thisPtr, bestTarget)) {
-                bestTarget = nullptr;
-            }
+    if (!bestTarget || (aggressiveFrameCounter % 2) == 0) {
+        ForceAimRefresh(thisPtr);
+        original_UpdateAimTarget(thisPtr);
+        original_UpdateAimTarget(thisPtr);
+        bestTarget = FindBestTarget(thisPtr);
+        if (IsProbablyValidPtr(bestTarget) && !CanAttackTargetTransform(thisPtr, bestTarget)) {
+            bestTarget = nullptr;
         }
+    }
 
-        if (!bestTarget) {
-            bestTarget = ResolveBestAggressiveAimTarget(thisPtr);
-        }
+    if (!bestTarget) {
+        bestTarget = ResolveBestAggressiveAimTarget(thisPtr);
     }
 
     if (!bestTarget) return;
@@ -2306,13 +1730,10 @@ void hook_UpdateAimTarget(void* thisPtr) {
         AimTargetState* aimStatePtr = reinterpret_cast<AimTargetState*>((char*)thisPtr + 0x20);
         *aimStatePtr = Aiming_Focus;
 
-        // Mantém ambos os campos de alvo alinhados em modo agressivo.
-        if (aimBotAggressive) {
-            void** aimTargetPtr = reinterpret_cast<void**>((char*)thisPtr + 0x24);
-            if (aimTargetPtr) *aimTargetPtr = bestTarget;
-            void** aimTargetCamPtr = reinterpret_cast<void**>((char*)thisPtr + 0x28);
-            if (aimTargetCamPtr) *aimTargetCamPtr = bestTarget;
-        }
+        void** aimTargetPtr = reinterpret_cast<void**>((char*)thisPtr + 0x24);
+        if (aimTargetPtr) *aimTargetPtr = bestTarget;
+        void** aimTargetCamPtr = reinterpret_cast<void**>((char*)thisPtr + 0x28);
+        if (aimTargetCamPtr) *aimTargetCamPtr = bestTarget;
     } catch (...) {
     }
 }
@@ -2330,11 +1751,11 @@ void hook_SetAimState(void* thisPtr, AimTargetState state, void* target, bool fo
     
     AimTargetState finalState = state;
     
-    // Quando autoAim/aimBot ativos, mantém foco se houver alvo válido.
-    if ((autoAim || aimBot || aimBotAggressive) && target && state == Aiming_NotFocus) {
+    // Quando o aimbot agressivo está ativo, mantém foco se houver alvo válido.
+    if (aimBotAggressive && target && state == Aiming_NotFocus) {
         finalState = Aiming_Focus;
         forceTarget = true;
-        __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIM", "Auto-aim: Convertendo NotFocus para Focus");
+        __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIM", "AimBot agressivo: Convertendo NotFocus para Focus");
     }
     
     __android_log_print(ANDROID_LOG_DEBUG, "MOD_AIM", 
@@ -2347,14 +1768,6 @@ void hook_SetAimState(void* thisPtr, AimTargetState state, void* target, bool fo
 
 void ProcessGameplayFrame(void* myCtrlPlayer) {
     if (!myCtrlPlayer) return;
-
-    if (debugEnemyPos) {
-        static int worldToScreenLogFrameCounter = 0;
-        worldToScreenLogFrameCounter++;
-        if ((worldToScreenLogFrameCounter % 120) == 0) {
-            LogWorldToScreenSamples();
-        }
-    }
 
     if (pendingBulletTailClear) {
         ClearBulletTailNow();
@@ -2461,7 +1874,7 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
         }
     }
 
-    if ((aimBot || aimBotAggressive) && IsProbablyValidPtr(GetPlayingUICreatorInstance())) {
+    if (aimBotAggressive && IsProbablyValidPtr(GetPlayingUICreatorInstance())) {
         static int markerFrameCounter = 0;
         markerFrameCounter++;
         if ((markerFrameCounter % 10) == 0) {
@@ -2527,52 +1940,6 @@ void *hack_thread(void *) {
     MSHookFunction((void *) addr_GetMyPlayerRealtimeData, (void *) &hook_GetMyPlayerRealtimeData,
                    (void **) &original_GetMyPlayerRealtimeData);
 
-    // ====== Hooks do sistema de posição de inimigos ======
-
-    // Hook para monitorar posições de inimigos
-    uintptr_t addr_GetEnemyBurnPos = getAbsoluteAddress(targetLibName, 0x2E678C);
-    MSHookFunction((void *) addr_GetEnemyBurnPos, (void *) &hook_GetEnemyBurnPos,
-                   (void **) &original_GetEnemyBurnPos);
-
-    // Hook para monitorar posições de policiais
-    uintptr_t addr_GetPoliceBurnPos = getAbsoluteAddress(targetLibName, 0x2E6B40);
-    MSHookFunction((void *) addr_GetPoliceBurnPos, (void *) &hook_GetPoliceBurnPos,
-                   (void **) &original_GetPoliceBurnPos);
-
-    // Hook para monitorar limpeza de inimigos
-    uintptr_t addr_ClearHasEnemy = getAbsoluteAddress(targetLibName, 0x2E6EC0);
-    MSHookFunction((void *) addr_ClearHasEnemy, (void *) &hook_ClearHasEnemy,
-                   (void **) &original_ClearHasEnemy);
-
-    // Hook para monitorar verificação de tipos de posição
-    uintptr_t addr_HasScenePosType = getAbsoluteAddress(targetLibName, 0x2E6568);
-    MSHookFunction((void *) addr_HasScenePosType, (void *) &hook_HasScenePosType,
-                   (void **) &original_HasScenePosType);
-
-    // ====== Hooks do sistema de itens ======
-
-    // Hook para modificar a quantidade de itens
-    uintptr_t addr_GetDropGoodNumber = getAbsoluteAddress(targetLibName, 0x53B1A0);
-    MSHookFunction((void *) addr_GetDropGoodNumber, (void *) &hook_GetDropGoodNumber,
-                   (void **) &original_GetDropGoodNumber);
-
-    // Hook para monitorar mudanças na quantidade de itens
-    uintptr_t addr_SetDropGoodNumber = getAbsoluteAddress(targetLibName, 0x53B71C);
-    MSHookFunction((void *) addr_SetDropGoodNumber, (void *) &hook_SetDropGoodNumber,
-                   (void **) &original_SetDropGoodNumber);
-
-    // ====== Hooks das novas funcionalidades ======
-
-    // Hook para tempo de recarga das armas
-    uintptr_t addr_GetReloadTime = getAbsoluteAddress(targetLibName, 0x456E48);
-    MSHookFunction((void *) addr_GetReloadTime, (void *) &hook_GetReloadTime,
-                   (void **) &original_GetReloadTime);
-
-    // Hook para dados de origem do jogador (inclui velocidades)
-    uintptr_t addr_GetMyPlayerOriData = getAbsoluteAddress(targetLibName, 0x4972F4);
-    MSHookFunction((void *) addr_GetMyPlayerOriData, (void *) &hook_GetMyPlayerOriData,
-                   (void **) &original_GetMyPlayerOriData);
-
     // ====== Hooks do sistema de mira ======
 
     // Hook para atualização de alvos de mira
@@ -2611,53 +1978,22 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("3_InputValue_Adicionar Gems (15/02/2026)"),
             OBFUSCATE("5_SeekBar_Balas das Armas (15/02/2026)_1_999999"),
 
-            // Debug de inimigos
-            OBFUSCATE("Category_Debug de Inimigos"),
-            OBFUSCATE("6_Toggle_Debug Posições de Inimigos (15/02/2026)"),
-            OBFUSCATE("7_Button_Forçar Remoção de Inimigos (15/02/2026)"),
-
             // Gerenciamento de itens
             OBFUSCATE("Category_Gerenciamento de Itens"),
-            OBFUSCATE("8_Toggle_Ouro/Diamantes Infinitos (15/02/2026)"),
-            OBFUSCATE("9_Toggle_Munição Infinita (15/02/2026)"),
-            OBFUSCATE("10_Toggle_Vida Infinita (Via Itens) (15/02/2026)"),
-            OBFUSCATE("11_Toggle_Recursos Infinitos (15/02/2026)"),
             OBFUSCATE("12_Button_Adicionar Todas as Partes de Armas (15/02/2026)"),
             OBFUSCATE("13_Button_Adicionar Todas as Peles (15/02/2026)"),
             OBFUSCATE("14_Button_Adicionar 10 Whisky (15/02/2026)"),
 
-            // Novas funcionalidades
-            OBFUSCATE("Category_Controle do Jogador"),
-            OBFUSCATE("15_Button_Colocar no Cavalo (15/02/2026)"),
-            OBFUSCATE("16_Button_Remover do Cavalo (15/02/2026)"),
-            OBFUSCATE("17_Toggle_Recarga Instantânea (15/02/2026)"),
-            OBFUSCATE("18_Toggle_Hack de Velocidade (15/02/2026)"),
-            OBFUSCATE("19_SeekBar_Multiplicador de Velocidade (15/02/2026)_1_10"),
-
             // Sistema de mira
             OBFUSCATE("Category_Sistema de Mira"),
-            OBFUSCATE("20_Toggle_Auto-Aim (15/02/2026)"),
-            OBFUSCATE("21_Toggle_AimBot V3 (Funções Reais) (15/02/2026)"),
             OBFUSCATE("35_Toggle_AimBot Agressivo (15/02/2026)"),
             OBFUSCATE("22_Toggle_Sempre Headshot (15/02/2026)"),
-            OBFUSCATE("23_Button_Limpar Alvos de Mira (15/02/2026)"),
 
             // Sistema Policial
             OBFUSCATE("Category_Sistema Policial"),
-            OBFUSCATE("24_Button_Gerar Policiais (15/02/2026)"),
-            OBFUSCATE("25_Button_Ocultar Todos os Policiais (15/02/2026)"),
-            OBFUSCATE("26_Button_Mostrar Todos os Policiais (15/02/2026)"),
-            OBFUSCATE("27_Button_Obter Número Max de Policiais (15/02/2026)"),
-            OBFUSCATE("28_Button_Obter Posição de Spawn da Polícia (15/02/2026)"),
             OBFUSCATE("58_Button_Matar Somente Policiais (08/03/2026)"),
             OBFUSCATE("59_Toggle_Auto Limpar Policiais (08/03/2026)"),
             
-            // NPCs Especiais
-            OBFUSCATE("Category_NPCs da Lei"),
-            OBFUSCATE("29_Button_Obter Instância do Xerife (15/02/2026)"),
-            OBFUSCATE("30_Button_Obter Instância do Caçador (15/02/2026)"),
-            OBFUSCATE("31_Button_Obter Dados de NPC Inimigo (15/02/2026)"),
-
             // Modo voo (experimental)
             OBFUSCATE("Category_Modo Voo"),
             OBFUSCATE("32_Toggle_Modo Voo (Experimental) (15/02/2026)"),
@@ -2681,7 +2017,6 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("39_Button_Ocultar Marcador do Alvo (08/03/2026)"),
             OBFUSCATE("40_Toggle_ESP Completo (Barras de Vida) (08/03/2026)"),
             OBFUSCATE("41_Button_Atualizar ESP Agora (08/03/2026)"),
-            OBFUSCATE("42_Button_Obter Todas as Entidades (08/03/2026)"),
             OBFUSCATE("43_Toggle_Auto Kill Seguro (08/03/2026)"),
             OBFUSCATE("44_Button_Kill All Agora (08/03/2026)"),
             OBFUSCATE("45_Toggle_Trilhas de Tiro em Todos os Alvos (08/03/2026)"),
@@ -2709,12 +2044,15 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
 void Changes(JNIEnv *env, jclass clazz, jobject obj,
              jint featNum, jstring featName, jint value,
              jboolean boolean, jstring str) {
+    if (!IsDialogLoginValidated()) {
+        __android_log_print(ANDROID_LOG_WARN, "MOD_DIALOG", "Mudanca ignorada antes do login: %d", featNum);
+        return;
+    }
 
     LOGD(OBFUSCATE("Recurso: %d - %s | Valor: = %d | Bool: = %d | Texto: = %s"), featNum,
          env->GetStringUTFChars(featName, 0), value,
          boolean, str != NULL ? env->GetStringUTFChars(str, 0) : "");
 
-    void* enemyPosCtrl = nullptr;
     switch (featNum) {
         case 1: // Dano de bala
             if (value >= 1) {
@@ -2741,56 +2079,6 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             CallSaveRifleBullet(value);
             CallSavePistolBullet(value);
             break;
-        case 6: // Debug de posições de inimigos
-            debugEnemyPos = boolean;
-            if (boolean) {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_DEBUG", "Debug de posições de inimigos ativado");
-            } else {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_DEBUG", "Debug de posições de inimigos desativado");
-            }
-            break;
-        case 7: // Forçar remoção de inimigos
-            // Tenta obter a instância do controlador e chamar ClearHasEnemy
-            enemyPosCtrl = GetEnemyPosCtrlInstance();
-            if (enemyPosCtrl) {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_DEBUG", "Executando remoção forçada de inimigos");
-                hook_ClearHasEnemy(enemyPosCtrl);
-            } else {
-                __android_log_print(ANDROID_LOG_ERROR, "MOD_DEBUG", "Não foi possível obter a instância do EnemyPosCtrl");
-            }
-            break;
-        case 8: // Ouro/Diamantes infinitos
-            infiniteGold = boolean;
-            if (boolean) {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Ouro/Diamantes infinitos ativado");
-            } else {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Ouro/Diamantes infinitos desativado");
-            }
-            break;
-        case 9: // Munição infinita
-            infiniteAmmo = boolean;
-            if (boolean) {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Munição infinita ativada");
-            } else {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Munição infinita desativada");
-            }
-            break;
-        case 10: // Vida infinita via itens
-            infiniteHealth = boolean;
-            if (boolean) {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Vida infinita via itens ativada");
-            } else {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Vida infinita via itens desativada");
-            }
-            break;
-        case 11: // Recursos infinitos
-            infiniteResources = boolean;
-            if (boolean) {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Recursos infinitos ativado");
-            } else {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Recursos infinitos desativado");
-            }
-            break;
         case 12: // Adicionar todas as partes de armas
             // Adiciona 5 de cada parte de arma
             for (int i = GunPart1; i <= GunPart4; i++) {
@@ -2809,55 +2097,6 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             AddItemToInventory(WHISKY, 10);
             __android_log_print(ANDROID_LOG_INFO, "MOD_ITEMS", "Adicionadas 10 unidades de Whisky");
             break;
-        case 15: // Colocar no cavalo
-            __android_log_print(ANDROID_LOG_INFO, "MOD_HORSE", "🐎 Iniciando processo para montar no cavalo...");
-            CallSetPlayerOnHorse();
-            playerOnHorse = true;
-            break;
-        case 16: // Remover do cavalo  
-            __android_log_print(ANDROID_LOG_INFO, "MOD_HORSE", "🐎 Iniciando processo para desmontar do cavalo...");
-            CallSetPlayerOffHorse();
-            playerOnHorse = false;
-            break;
-        case 17: // Recarga instantânea
-            instantReload = boolean;
-            if (boolean) {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_RELOAD", "Recarga instantânea ativada");
-            } else {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_RELOAD", "Recarga instantânea desativada");
-            }
-            break;
-        case 18: // Hack de velocidade
-            speedHack = boolean;
-            if (boolean) {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_SPEED", "Hack de velocidade ativado");
-            } else {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_SPEED", "Hack de velocidade desativado");
-            }
-            break;
-        case 19: // Multiplicador de velocidade
-            if (value >= 1 && value <= 10) {
-                speedMultiplier = (float)value;
-                __android_log_print(ANDROID_LOG_INFO, "MOD_SPEED", 
-                                    "Multiplicador de velocidade alterado para: %.1f", speedMultiplier);
-            }
-            break;
-        case 20: // Auto-Aim
-            autoAim = boolean;
-            if (boolean) {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Auto-Aim ativado");
-            } else {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Auto-Aim desativado");
-            }
-            break;
-        case 21: // AimBot V3
-            aimBot = boolean;
-            if (boolean) {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_AIMBOT", "🎯 AimBot V3 ativado - USA FUNÇÕES REAIS do dump.cs (NPCs🎯/Zumbis🧟/Ogros👹) - NUNCA mira no próprio player");
-            } else {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_AIMBOT", "AimBot V3 desativado");
-            }
-            break;
         case 35: // AimBot Agressivo
             aimBotAggressive = boolean;
             if (boolean) {
@@ -2874,53 +2113,6 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
                 __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Sempre Headshot desativado");
             }
             break;
-        case 23: // Limpar alvos de mira
-            __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Limpando todos os alvos de mira...");
-            {
-                void* myCtrlPlayer = GetMyCtrlPlayerInstance();
-                if (myCtrlPlayer) {
-                    ForceAimRefresh(myCtrlPlayer);
-                    __android_log_print(ANDROID_LOG_INFO, "MOD_AIM", "Alvos de mira limpos com sucesso");
-                } else {
-                    __android_log_print(ANDROID_LOG_WARN, "MOD_AIM", "MyCtrlPlayer indisponivel para limpar a mira");
-                }
-            }
-            break;
-            
-        // ========== SISTEMA POLICIAL ==========
-        case 24: // Gerar policiais
-            {
-                pendingGeneratePolice = true;
-                __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "GeneratePolice agendado (execução segura no hook)");
-            }
-            break;
-        case 25: // Ocultar todos os policiais
-            {
-                pendingHidePolice = true;
-                __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "HideAllPolice agendado (execução segura no hook)");
-            }
-            break;
-        case 26: // Mostrar todos os policiais
-            {
-                pendingShowPolice = true;
-                __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "ShowAllPolice agendado (execução segura no hook)");
-            }
-            break;
-        case 27: // Obter número máximo de policiais
-            {
-                int maxPolice = GetPoliceMaxNum();
-                // O valor será retornado pela função
-            }
-            break;
-        case 28: // Obter posição de spawn da polícia
-            {
-                void* enemyPosCtrl = GetEnemyPosCtrlInstance();
-                if (enemyPosCtrl) {
-                    Vector3 playerPos = {0.0f, 0.0f, 0.0f}; // Posição padrão
-                    Vector3 policePos = GetPoliceBurnPos(enemyPosCtrl, playerPos, 10.0f, 50.0f);
-                }
-            }
-            break;
         case 58: // Matar somente policiais
             pendingKillPoliceOnly = true;
             __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "Kill Police agendado");
@@ -2931,25 +2123,6 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
                                 boolean ? "Auto limpar policiais ativado" : "Auto limpar policiais desativado");
             break;
             
-        // ========== NPCs DA LEI ==========
-        case 29: // Obter instância do xerife
-            {
-                void* sheriff = GetSheriffInstance();
-                // Instância do xerife obtida
-            }
-            break;
-        case 30: // Obter instância do caçador de recompensas
-            {
-                void* bountyHunter = GetBountyHunterInstance();
-                // Instância do caçador obtida
-            }
-            break;
-        case 31: // Obter dados de NPC inimigo
-            {
-                void* npcData = GetNPCenemyOriData(1); // ID padrão 1
-                // Dados do NPC obtidos
-            }
-            break;
         case 32: // Modo voo experimental
             flyMode = boolean;
             if (boolean) {
@@ -3057,9 +2230,6 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
                 __android_log_print(ANDROID_LOG_WARN, "MOD_ESP", "Atualizacao manual bloqueada: estado do jogo invalido");
             }
             break;
-        case 42: // Obter todas as entidades
-            LogTrackedEntities();
-            break;
         case 43: // Auto Kill Seguro
             if (boolean) {
                 if (CanRunAutoKill()) {
@@ -3154,6 +2324,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
  */
 __attribute__((constructor))
 void lib_main() {
+    QueueLibLoadDialog("West Gunfighter Login", "Digite usuario e senha 9778 para continuar.");
     pthread_t ptid;
     pthread_create(&ptid, nullptr, hack_thread, nullptr);
 }
@@ -3457,26 +2628,6 @@ bool CanRunAutoKill() {
     return CollectActiveEnemyBases(enemies, 4) > 0;
 }
 
-static int GetEntityManagerCount() {
-    try {
-        uintptr_t addrGetInstance = getAbsoluteAddress(targetLibName, 0x2E8CF0); // EntityManager.GetInstance()
-        if (addrGetInstance == 0) return 0;
-
-        auto getEntityManager = reinterpret_cast<GetEntityManagerInstanceFunc>(addrGetInstance);
-        void* entityManager = getEntityManager(nullptr);
-        if (!IsProbablyValidPtr(entityManager)) return 0;
-
-        // dump.cs: EntityManager.m_EntityMap // 0x8
-        auto* entityMap = *reinterpret_cast<Il2CppDictionary<int, void*>**>(reinterpret_cast<char*>(entityManager) + 0x8);
-        if (!entityMap) return 0;
-
-        int count = entityMap->count;
-        return count > 0 ? count : 0;
-    } catch (...) {
-        return 0;
-    }
-}
-
 static void AppendUniquePlayer(void** players, int& count, int maxPlayers, void* player) {
     if (!IsProbablyValidPtr(player) || count >= maxPlayers) return;
     for (int i = 0; i < count; ++i) {
@@ -3498,22 +2649,6 @@ static void CollectPlayersFromList(void* listPtr, void** players, int& count, in
     int limit = size < static_cast<int>(maxLength) ? size : static_cast<int>(maxLength);
     for (int i = 0; i < limit; ++i) {
         AppendUniquePlayer(players, count, maxPlayers, list->items->items[i]);
-    }
-}
-
-static void CollectPlayersFromDictionary(void* dictPtr, void** players, int& count, int maxPlayers) {
-    if (!IsProbablyValidPtr(dictPtr)) return;
-
-    auto* dict = reinterpret_cast<Il2CppDictionary<int, void*>*>(dictPtr);
-    if (!dict || !dict->valueSlots) return;
-
-    int touchedSlots = dict->touchedSlots;
-    if (touchedSlots <= 0 || touchedSlots > 1024) return;
-
-    uint32_t maxLength = dict->valueSlots->max_length;
-    int limit = touchedSlots < static_cast<int>(maxLength) ? touchedSlots : static_cast<int>(maxLength);
-    for (int i = 0; i < limit; ++i) {
-        AppendUniquePlayer(players, count, maxPlayers, dict->valueSlots->items[i]);
     }
 }
 
@@ -3855,16 +2990,6 @@ void ClearCompleteESP() {
     } catch (...) {
         __android_log_print(ANDROID_LOG_ERROR, "MOD_ESP", "Falha ao limpar ESP");
     }
-}
-
-void LogTrackedEntities() {
-    void* players[256] = {};
-    int trackedPlayers = CollectTrackedPlayers(players, 256);
-    int entityManagerCount = GetEntityManagerCount();
-
-    __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
-                        "Entidades rastreadas: trackedPlayers=%d entityManager=%d",
-                        trackedPlayers, entityManagerCount);
 }
 
 void ShowTargetMarkerOnCurrentTarget() {
@@ -4809,7 +3934,6 @@ void ProcessGameplayHints() {
     static bool lastCompleteEsp = false;
     static bool lastAutoKill = false;
     static bool lastBulletTailEsp = false;
-    static bool lastAimBot = false;
     static bool lastAimBotAggressive = false;
     static bool lastNpcWar = false;
     static int lastScene = -1;
@@ -4824,7 +3948,6 @@ void ProcessGameplayHints() {
         lastCompleteEsp = completeEsp;
         lastAutoKill = autoKill;
         lastBulletTailEsp = bulletTailEsp;
-        lastAimBot = aimBot;
         lastAimBotAggressive = aimBotAggressive;
         lastNpcWar = npcWarMode;
         lastScene = GetCurrentGameSceneValue();
@@ -4845,11 +3968,6 @@ void ProcessGameplayHints() {
     if (lastBulletTailEsp != bulletTailEsp) {
         ShowWordsHintText(bulletTailEsp ? "TRAIL ESP ON" : "TRAIL ESP OFF", 2.0f);
         lastBulletTailEsp = bulletTailEsp;
-    }
-
-    if (lastAimBot != aimBot) {
-        ShowWordsHintText(aimBot ? "AIMBOT ON" : "AIMBOT OFF", 2.0f);
-        lastAimBot = aimBot;
     }
 
     if (lastAimBotAggressive != aimBotAggressive) {
