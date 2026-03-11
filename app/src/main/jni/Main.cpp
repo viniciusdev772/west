@@ -101,6 +101,16 @@ volatile bool pendingChaosFx = false;
 volatile bool pendingKillPoliceOnly = false;
 char pendingCustomWordsText[256] = {0};
 
+enum TeleportRequestMode {
+    TeleportNone = 0,
+    TeleportCurrentTarget = 1,
+    TeleportNearestHostile = 2,
+    TeleportNearestMissionNpc = 3,
+    TeleportNearestMapNpc = 4
+};
+
+volatile int pendingTeleportRequest = TeleportNone;
+
 // Estrutura para dados do jogador em tempo real
 struct MyPlayerRealtimeData {
     int maxBlood;    // Vida máxima no offset 0x8
@@ -466,6 +476,7 @@ void RunChaosWeaponOnce();
 void RunChaosFxOnce();
 void RunKillPoliceOnlyOnce();
 void RunNpcWarFrame();
+bool RunTeleportToRequest(int requestMode);
 void* ResolveBestAggressiveAimTarget(void* myCtrlPlayer);
 void* GetGameCtrlInstance();
 void* GetMyPlayerInstance();
@@ -494,8 +505,16 @@ static Vector3 NormalizeXZ(const Vector3& value);
 static float ClampMagnitudeXZ(float value, float minValue, float maxValue);
 static bool IsFlyableEnemyBase(void* enemyBase, void** outPlayer);
 static void* GetPlayerBaseFromPlayer(void* player);
+static void* ResolveTargetPlayerForBulletTail();
 static void* ResolveNpcFlightTargetPlayer();
 static void RestoreSingleEnemyFlightState(void* enemyPlayer);
+static bool ResolvePlayerMetaFromPlayer(void* player, int& outBaseType, int& outAnimalType, int& outGunID, Vector3* outPos);
+static void AppendUniquePlayer(void** outPlayers, int& count, int maxPlayers, void* player);
+static int CollectLivingPlayers(void** outPlayers, int maxPlayers);
+static bool IsTeleportHostileType(int baseType, int animalType, int gunID);
+static void* ResolvePlayerFromTrackedTransform(void* targetTransform);
+static void* ResolveTeleportTargetPlayer(int requestMode);
+static bool TeleportMyPlayerNearTarget(void* targetPlayer, const char* reasonText);
 
 bool IsValidAimTransform(void* target, void* playerCtrl) {
     if (!target || target == playerCtrl) return false;
@@ -711,6 +730,41 @@ static bool ResolveCombatData(void* enemyBase, void** outPlayer, int& outBaseTyp
 
         if (!GetPlayerWorldPosition(player, outPos)) return false;
         if (outPlayer) *outPlayer = player;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool ResolvePlayerMetaFromPlayer(void* player, int& outBaseType, int& outAnimalType, int& outGunID, Vector3* outPos) {
+    outBaseType = -1;
+    outAnimalType = -1;
+    outGunID = 0;
+    if (outPos) *outPos = {0.0f, 0.0f, 0.0f};
+    if (!IsProbablyValidPtr(player)) return false;
+
+    try {
+        void* playerBase = GetPlayerBaseFromPlayer(player);
+        if (!IsProbablyValidPtr(playerBase)) return false;
+
+        void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(playerBase) + 0x14); // PlayerBase.m_dPlayerBaseData
+        if (!IsProbablyValidPtr(baseData)) return false;
+
+        void* property = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0x8); // PlayerBaseData.m_dProperty
+        if (!IsProbablyValidPtr(property)) return false;
+
+        outBaseType = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0xC); // PlayerBaseProperty.baseType
+        int maxBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x10); // PlayerBaseProperty.m_dMaxBlood
+        int currentBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x14); // PlayerBaseProperty.m_dCurrentBlood
+        if (currentBlood <= 0 || maxBlood <= 0) return false;
+
+        void* aiData = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0xC); // PlayerBaseData.m_dAIdata
+        if (IsProbablyValidPtr(aiData)) {
+            outAnimalType = *reinterpret_cast<int*>(reinterpret_cast<char*>(aiData) + 0x8); // AIdata.animalType
+            outGunID = *reinterpret_cast<int*>(reinterpret_cast<char*>(aiData) + 0x10); // AIdata.gunID
+        }
+
+        if (outPos && !GetPlayerWorldPosition(player, *outPos)) return false;
         return true;
     } catch (...) {
         return false;
@@ -1829,6 +1883,12 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
         pendingKillPoliceOnly = false;
     }
 
+    if (pendingTeleportRequest != TeleportNone) {
+        const int requestMode = pendingTeleportRequest;
+        pendingTeleportRequest = TeleportNone;
+        RunTeleportToRequest(requestMode);
+    }
+
     if (flyMode) {
         ApplyFlyMovementFrame(myCtrlPlayer);
     }
@@ -2037,6 +2097,11 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("47_Toggle_ESP Inimigos no Minimapa (08/03/2026)"),
             OBFUSCATE("48_Button_Mostrar Texto de Teste (08/03/2026)"),
             OBFUSCATE("49_InputText_Mostrar Texto Custom (08/03/2026)"),
+            OBFUSCATE("Category_Teleport"),
+            OBFUSCATE("60_Button_Teleportar Para Alvo Atual (10/03/2026)"),
+            OBFUSCATE("61_Button_Teleportar Para Hostil Mais Proximo (10/03/2026)"),
+            OBFUSCATE("62_Button_Teleportar Para NPC de Missao (10/03/2026)"),
+            OBFUSCATE("63_Button_Teleportar Para NPC do Mapa (10/03/2026)"),
     };
 
     int Total_Feature = (sizeof features / sizeof features[0]);
@@ -2136,6 +2201,22 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             autoClearPolice = boolean;
             __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE",
                                 boolean ? "Auto limpar policiais ativado" : "Auto limpar policiais desativado");
+            break;
+        case 60: // Teleportar para alvo atual
+            pendingTeleportRequest = TeleportCurrentTarget;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_TELEPORT", "Teleport para alvo atual agendado");
+            break;
+        case 61: // Teleportar para hostil mais proximo
+            pendingTeleportRequest = TeleportNearestHostile;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_TELEPORT", "Teleport para hostil mais proximo agendado");
+            break;
+        case 62: // Teleportar para NPC de missao
+            pendingTeleportRequest = TeleportNearestMissionNpc;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_TELEPORT", "Teleport para NPC de missao agendado");
+            break;
+        case 63: // Teleportar para NPC do mapa
+            pendingTeleportRequest = TeleportNearestMapNpc;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_TELEPORT", "Teleport para NPC do mapa agendado");
             break;
             
         case 32: // Modo voo experimental
@@ -2713,6 +2794,72 @@ static int CollectTrackedPlayers(void** outPlayers, int maxPlayers) {
     return count;
 }
 
+static int CollectLivingPlayers(void** outPlayers, int maxPlayers) {
+    if (!outPlayers || maxPlayers <= 0) return 0;
+
+    for (int i = 0; i < maxPlayers; ++i) {
+        outPlayers[i] = nullptr;
+    }
+
+    int count = 0;
+
+    try {
+        void* trackedPlayers[256] = {};
+        int trackedCount = CollectTrackedPlayers(trackedPlayers, 256);
+        for (int i = 0; i < trackedCount; ++i) {
+            AppendUniquePlayer(outPlayers, count, maxPlayers, trackedPlayers[i]);
+        }
+
+        void* enemies[256] = {};
+        int enemyCount = CollectActiveEnemyBases(enemies, 256);
+        for (int i = 0; i < enemyCount; ++i) {
+            if (!IsProbablyValidPtr(enemies[i])) continue;
+            void* enemyPlayer = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemies[i]) + 0xC); // PlayerBase.m_dPlayer
+            AppendUniquePlayer(outPlayers, count, maxPlayers, enemyPlayer);
+        }
+
+        void* myPlayer = GetMyPlayerInstance();
+        for (int i = 0; i < count; ++i) {
+            void* player = outPlayers[i];
+            if (!IsProbablyValidPtr(player) || player == myPlayer) {
+                continue;
+            }
+
+            int baseType = -1;
+            int animalType = -1;
+            int gunID = 0;
+            if (!ResolvePlayerMetaFromPlayer(player, baseType, animalType, gunID, nullptr)) {
+                outPlayers[i] = nullptr;
+            }
+        }
+
+        int compacted = 0;
+        for (int i = 0; i < count; ++i) {
+            if (!IsProbablyValidPtr(outPlayers[i])) continue;
+            outPlayers[compacted++] = outPlayers[i];
+        }
+        return compacted;
+    } catch (...) {
+        return count;
+    }
+}
+
+static bool IsTeleportHostileType(int baseType, int animalType, int gunID) {
+    switch (baseType) {
+        case EnemyNPC:
+        case Zombies:
+        case Ogre:
+            return true;
+        case Animal:
+            return animalType == Cheetah || animalType == Bear || animalType == Wolf01 ||
+                   animalType == Wolf02 || animalType == Wolf03;
+        case MissionPerson:
+            return animalType == Sheriff || animalType == BountyHunter || gunID > 0;
+        default:
+            return false;
+    }
+}
+
 int CollectActiveEnemyBases(void** outEnemies, int maxEnemies) {
     if (!outEnemies || maxEnemies <= 0) return 0;
 
@@ -3152,15 +3299,11 @@ static bool PlayerContainsTransform(void* player, void* targetTransform) {
     return false;
 }
 
-static void* ResolveTargetPlayerForBulletTail() {
-    void* myCtrlPlayer = GetMyCtrlPlayerInstance();
-    if (!IsProbablyValidPtr(myCtrlPlayer)) return nullptr;
-
-    void* targetTransform = FindBestTarget(myCtrlPlayer);
+static void* ResolvePlayerFromTrackedTransform(void* targetTransform) {
     if (!IsProbablyValidPtr(targetTransform)) return nullptr;
 
     void* players[256] = {};
-    int trackedPlayers = CollectTrackedPlayers(players, 256);
+    int trackedPlayers = CollectLivingPlayers(players, 256);
     for (int i = 0; i < trackedPlayers; ++i) {
         void* player = players[i];
         if (!IsProbablyValidPtr(player)) continue;
@@ -3171,6 +3314,15 @@ static void* ResolveTargetPlayerForBulletTail() {
     }
 
     return nullptr;
+}
+
+static void* ResolveTargetPlayerForBulletTail() {
+    void* myCtrlPlayer = GetMyCtrlPlayerInstance();
+    if (!IsProbablyValidPtr(myCtrlPlayer)) return nullptr;
+
+    void* targetTransform = FindBestTarget(myCtrlPlayer);
+    if (!IsProbablyValidPtr(targetTransform)) return nullptr;
+    return ResolvePlayerFromTrackedTransform(targetTransform);
 }
 
 bool CanUseBulletTail() {
@@ -3860,6 +4012,164 @@ static void* GetPlayerBaseFromPlayer(void* player) {
     } catch (...) {
         return nullptr;
     }
+}
+
+static void* ResolveTeleportTargetPlayer(int requestMode) {
+    void* myPlayer = GetMyPlayerInstance();
+    if (!IsProbablyValidPtr(myPlayer)) return nullptr;
+
+    if (requestMode == TeleportCurrentTarget) {
+        void* resolvedTarget = ResolveTargetPlayerForBulletTail();
+        if (IsProbablyValidPtr(resolvedTarget)) return resolvedTarget;
+
+        void* myCtrlPlayer = GetMyCtrlPlayerInstance();
+        if (!IsProbablyValidPtr(myCtrlPlayer)) return nullptr;
+
+        void* targetTransform = FindBestTarget(myCtrlPlayer);
+        return ResolvePlayerFromTrackedTransform(targetTransform);
+    }
+
+    Vector3 myPos = {0.0f, 0.0f, 0.0f};
+    if (!GetPlayerWorldPosition(myPlayer, myPos)) return nullptr;
+
+    if (requestMode == TeleportNearestHostile) {
+        void* players[256] = {};
+        int playerCount = CollectLivingPlayers(players, 256);
+        void* bestPlayer = nullptr;
+        float bestDistanceSq = 1.0e30f;
+
+        for (int i = 0; i < playerCount; ++i) {
+            void* enemyPlayer = players[i];
+            if (!IsProbablyValidPtr(enemyPlayer) || enemyPlayer == myPlayer) continue;
+
+            int baseType = -1;
+            int animalType = -1;
+            int gunID = 0;
+            Vector3 enemyPos = {0.0f, 0.0f, 0.0f};
+            if (!ResolvePlayerMetaFromPlayer(enemyPlayer, baseType, animalType, gunID, &enemyPos)) continue;
+            if (!IsTeleportHostileType(baseType, animalType, gunID)) continue;
+
+            const float dx = enemyPos.x - myPos.x;
+            const float dy = enemyPos.y - myPos.y;
+            const float dz = enemyPos.z - myPos.z;
+            const float distanceSq = dx * dx + dy * dy + dz * dz;
+            if (distanceSq < bestDistanceSq) {
+                bestDistanceSq = distanceSq;
+                bestPlayer = enemyPlayer;
+            }
+        }
+
+        return bestPlayer;
+    }
+
+    if (requestMode == TeleportNearestMissionNpc || requestMode == TeleportNearestMapNpc) {
+        void* players[256] = {};
+        int playerCount = CollectLivingPlayers(players, 256);
+        void* bestPlayer = nullptr;
+        float bestDistanceSq = 1.0e30f;
+
+        for (int i = 0; i < playerCount; ++i) {
+            void* player = players[i];
+            if (!IsProbablyValidPtr(player) || player == myPlayer) continue;
+
+            int baseType = -1;
+            int animalType = -1;
+            int gunID = 0;
+            Vector3 playerPos = {0.0f, 0.0f, 0.0f};
+            if (!ResolvePlayerMetaFromPlayer(player, baseType, animalType, gunID, &playerPos)) continue;
+
+            if (requestMode == TeleportNearestMissionNpc && baseType != MissionPerson) continue;
+            if (requestMode == TeleportNearestMapNpc && baseType != NonPermanentNpc) continue;
+
+            const float dx = playerPos.x - myPos.x;
+            const float dy = playerPos.y - myPos.y;
+            const float dz = playerPos.z - myPos.z;
+            const float distanceSq = dx * dx + dy * dy + dz * dz;
+            if (distanceSq < bestDistanceSq) {
+                bestDistanceSq = distanceSq;
+                bestPlayer = player;
+            }
+        }
+
+        return bestPlayer;
+    }
+
+    return nullptr;
+}
+
+static bool TeleportMyPlayerNearTarget(void* targetPlayer, const char* reasonText) {
+    if (!IsProbablyValidPtr(targetPlayer)) return false;
+
+    void* myCtrlPlayer = GetMyCtrlPlayerInstance();
+    void* ctrlPlayer = GetCtrlPlayerFromMyCtrl();
+    if (!IsProbablyValidPtr(myCtrlPlayer) || !IsProbablyValidPtr(ctrlPlayer)) return false;
+
+    uintptr_t addrSetPosMyCtrl = getAbsoluteAddress(targetLibName, 0x45D69C); // MyCtrlPlayer.SetPosition(Vector3)
+    uintptr_t addrSetPosPlayer = getAbsoluteAddress(targetLibName, 0x348A38); // Player.SetPosition(Vector3)
+    uintptr_t addrSetCurrentVelocity = getAbsoluteAddress(targetLibName, 0x35C8F8); // Player.SetCurrentVelocity(Vector3)
+    uintptr_t addrSetNavMeshEnable = getAbsoluteAddress(targetLibName, 0x34897C); // Player.SetNavMesEnable(bool)
+    uintptr_t addrSetNavMeshSpeed = getAbsoluteAddress(targetLibName, 0x35C038); // Player.SetNavMesSpeed(float)
+    if (addrSetPosMyCtrl == 0 || addrSetPosPlayer == 0 || addrSetCurrentVelocity == 0) return false;
+
+    auto setPosMyCtrl = reinterpret_cast<MyCtrlPlayerSetPositionFunc>(addrSetPosMyCtrl);
+    auto setPosPlayer = reinterpret_cast<PlayerSetPositionFunc>(addrSetPosPlayer);
+    auto setCurrentVelocity = reinterpret_cast<PlayerSetCurrentVelocityFunc>(addrSetCurrentVelocity);
+    auto setNavMeshEnable = reinterpret_cast<PlayerSetNavMeshEnableFunc>(addrSetNavMeshEnable);
+    auto setNavMeshSpeed = reinterpret_cast<PlayerSetNavMeshSpeedFunc>(addrSetNavMeshSpeed);
+
+    Vector3 myPos = {0.0f, 0.0f, 0.0f};
+    Vector3 targetPos = {0.0f, 0.0f, 0.0f};
+    if (!GetPlayerWorldPosition(ctrlPlayer, myPos) || !GetPlayerWorldPosition(targetPlayer, targetPos)) return false;
+
+    Vector3 offsetDir = NormalizeXZ({targetPos.x - myPos.x, 0.0f, targetPos.z - myPos.z});
+    if (Vector3LengthXZ(offsetDir) <= 0.001f) {
+        offsetDir = {1.0f, 0.0f, 0.0f};
+    }
+
+    Vector3 finalPos = targetPos;
+    finalPos.x -= offsetDir.x * 1.8f;
+    finalPos.z -= offsetDir.z * 1.8f;
+    finalPos.y += 0.15f;
+
+    Vector3 zeroVel = {0.0f, 0.0f, 0.0f};
+    if (addrSetNavMeshEnable != 0) {
+        setNavMeshEnable(ctrlPlayer, true, nullptr);
+    }
+    if (addrSetNavMeshSpeed != 0) {
+        setNavMeshSpeed(ctrlPlayer, 4.0f, nullptr);
+    }
+    setCurrentVelocity(ctrlPlayer, zeroVel, nullptr);
+    setPosPlayer(ctrlPlayer, finalPos, nullptr);
+    setPosMyCtrl(myCtrlPlayer, finalPos, nullptr);
+
+    char buffer[96] = {0};
+    std::snprintf(buffer, sizeof(buffer), "TELEPORT: %s", reasonText ? reasonText : "ALVO");
+    ShowWordsHintText(buffer, 2.4f);
+    return true;
+}
+
+bool RunTeleportToRequest(int requestMode) {
+    const char* reasonText = nullptr;
+    switch (requestMode) {
+        case TeleportCurrentTarget: reasonText = "ALVO ATUAL"; break;
+        case TeleportNearestHostile: reasonText = "HOSTIL MAIS PROXIMO"; break;
+        case TeleportNearestMissionNpc: reasonText = "NPC DE MISSAO"; break;
+        case TeleportNearestMapNpc: reasonText = "NPC DO MAPA"; break;
+        default: return false;
+    }
+
+    void* targetPlayer = ResolveTeleportTargetPlayer(requestMode);
+    if (!IsProbablyValidPtr(targetPlayer)) {
+        ShowWordsHintText("TELEPORT FALHOU: ALVO INDISPONIVEL", 2.4f);
+        return false;
+    }
+
+    if (!TeleportMyPlayerNearTarget(targetPlayer, reasonText)) {
+        ShowWordsHintText("TELEPORT FALHOU: POSICAO INVALIDA", 2.4f);
+        return false;
+    }
+
+    return true;
 }
 
 static bool GetTargetKindText(char* outText, size_t outSize) {
