@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <android/log.h>
 #include <dlfcn.h>
 #include "Includes/Logger.h"
@@ -93,6 +94,7 @@ volatile bool pendingMiniMapEspRefresh = false;
 volatile bool pendingMiniMapEspClear = false;
 volatile bool pendingShowWordsTest = false;
 volatile bool pendingShowWordsCustom = false;
+volatile bool pendingLoginSuccessHintSequence = false;
 volatile bool pendingChaosTime = false;
 volatile bool pendingChaosSpawn = false;
 volatile bool pendingChaosUI = false;
@@ -100,6 +102,7 @@ volatile bool pendingChaosWeapon = false;
 volatile bool pendingChaosFx = false;
 volatile bool pendingKillPoliceOnly = false;
 char pendingCustomWordsText[256] = {0};
+char pendingLoginSuccessHints[12][128] = {0};
 
 enum TeleportRequestMode {
     TeleportNone = 0,
@@ -468,6 +471,13 @@ bool CanUseMiniMapEnemyEsp();
 void RefreshMiniMapEnemyEsp();
 void ClearMiniMapEnemyEsp();
 void ShowWordsHintText(const char* text, float showTime);
+void QueueLoginSuccessHints(const char* displayName, int remainingDays);
+
+static long long GetMonotonicTimeMs() {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<long long>(ts.tv_sec) * 1000LL + static_cast<long long>(ts.tv_nsec / 1000000LL);
+}
 void ProcessGameplayHints();
 void RunChaosTimeOnce();
 void RunChaosSpawnOnce();
@@ -1822,6 +1832,57 @@ void hook_SetAimState(void* thisPtr, AimTargetState state, void* target, bool fo
 
 void ProcessGameplayFrame(void* myCtrlPlayer) {
     if (!myCtrlPlayer) return;
+    static bool authLockActive = false;
+
+    if (!IsDialogLoginValidated()) {
+        if (!authLockActive) {
+            Health = false;
+            aimBotAggressive = false;
+            alwaysHeadshot = false;
+            flyMode = false;
+            npcFlyMode = false;
+            npcWarMode = false;
+            completeEsp = false;
+            autoKill = false;
+            bulletTailEsp = false;
+            minimapEnemyEsp = false;
+            autoClearPolice = false;
+
+            pendingCreateMissionHints = false;
+            pendingDestroyMissionHints = false;
+            pendingEspRefresh = false;
+            pendingEspClear = false;
+            pendingAutoKillBurst = false;
+            pendingBulletTailShot = false;
+            pendingBulletTailClear = false;
+            pendingMiniMapEspRefresh = false;
+            pendingMiniMapEspClear = false;
+            pendingShowWordsTest = false;
+            pendingShowWordsCustom = false;
+            pendingChaosTime = false;
+            pendingChaosSpawn = false;
+            pendingChaosUI = false;
+            pendingChaosWeapon = false;
+            pendingChaosFx = false;
+            pendingKillPoliceOnly = false;
+            pendingTeleportRequest = TeleportNone;
+
+            pendingCustomWordsText[0] = '\0';
+            SetFlyRuntimeState(false);
+            SetEnemyFlightState(false);
+            HideTargetMarker();
+            ClearCompleteESP();
+            ClearBulletTailNow();
+            ClearMiniMapEnemyEsp();
+
+            __android_log_print(ANDROID_LOG_WARN, "MOD_DIALOG",
+                                "Auth lock ativo: todas as funcoes do mod foram bloqueadas");
+            authLockActive = true;
+        }
+        return;
+    }
+
+    authLockActive = false;
 
     if (pendingBulletTailClear) {
         ClearBulletTailNow();
@@ -2420,7 +2481,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
  */
 __attribute__((constructor))
 void lib_main() {
-    QueueLibLoadDialog("West Gunfighter Login", "Digite usuario e senha 9778 para continuar.");
+    QueueLibLoadDialog("West Gunfighter Login", "Entre com sua conta Vinao Mods para validar o acesso.");
     pthread_t ptid;
     pthread_create(&ptid, nullptr, hack_thread, nullptr);
 }
@@ -3505,6 +3566,31 @@ void ShowWordsHintText(const char* text, float showTime) {
     }
 }
 
+void QueueLoginSuccessHints(const char* displayName, int remainingDays) {
+    const char* resolvedName = (displayName && displayName[0]) ? displayName : "ASSINANTE";
+    for (int i = 0; i < 4; ++i) {
+        std::snprintf(pendingLoginSuccessHints[i], sizeof(pendingLoginSuccessHints[i]),
+                      "BEM-VINDO, %s", resolvedName);
+    }
+
+    for (int i = 4; i < 8; ++i) {
+        std::snprintf(pendingLoginSuccessHints[i], sizeof(pendingLoginSuccessHints[i]),
+                      "%s, LOGIN VIP VALIDADO", resolvedName);
+    }
+
+    for (int i = 8; i < 12; ++i) {
+        if (remainingDays >= 0) {
+            std::snprintf(pendingLoginSuccessHints[i], sizeof(pendingLoginSuccessHints[i]),
+                          "LOGIN EXPIRA EM %d DIAS", remainingDays);
+        } else {
+            std::snprintf(pendingLoginSuccessHints[i], sizeof(pendingLoginSuccessHints[i]),
+                          "LOGIN EXPIRA EM DATA INDISPONIVEL");
+        }
+    }
+
+    pendingLoginSuccessHintSequence = true;
+}
+
 void RunChaosTimeOnce() {
     try {
         uintptr_t addrSetTimeScale = getAbsoluteAddress(targetLibName, 0x2EF174); // GameCtrl.SetTimeScale(float)
@@ -4256,6 +4342,9 @@ static const char* GetMissionStatusText() {
 
 void ProcessGameplayHints() {
     static bool initialized = false;
+    static bool loginSuccessSequenceActive = false;
+    static int loginSuccessSequenceIndex = 0;
+    static long long nextLoginSuccessHintAtMs = 0;
     static bool lastCompleteEsp = false;
     static bool lastAutoKill = false;
     static bool lastBulletTailEsp = false;
@@ -4278,6 +4367,30 @@ void ProcessGameplayHints() {
         lastScene = GetCurrentGameSceneValue();
         lastTrackedPlayers = CollectTrackedPlayers(initialTracked, 256);
         initialized = true;
+    }
+
+    if (pendingLoginSuccessHintSequence) {
+        pendingLoginSuccessHintSequence = false;
+        loginSuccessSequenceActive = true;
+        loginSuccessSequenceIndex = 0;
+        nextLoginSuccessHintAtMs = 0;
+    }
+
+    if (loginSuccessSequenceActive) {
+        const long long nowMs = GetMonotonicTimeMs();
+        if (nowMs >= nextLoginSuccessHintAtMs) {
+            const char* nextText = pendingLoginSuccessHints[loginSuccessSequenceIndex];
+            if (nextText && nextText[0]) {
+                ShowWordsHintText(nextText, 2.6f);
+            }
+
+            loginSuccessSequenceIndex++;
+            if (loginSuccessSequenceIndex >= 12) {
+                loginSuccessSequenceActive = false;
+            } else {
+                nextLoginSuccessHintAtMs = nowMs + 2200;
+            }
+        }
     }
 
     if (lastCompleteEsp != completeEsp) {

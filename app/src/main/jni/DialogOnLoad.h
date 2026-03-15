@@ -7,3 +7,4 @@ void RegisterDialogContext(JNIEnv* env, jobject context);
 void QueueLibLoadDialog(const char* title, const char* message);
 void ShowQueuedLibLoadDialog(JNIEnv* env, jobject context);
 void ShowQueuedLibLoadDialogWithRegisteredContext(JNIEnv* env);
+void QueueLoginSuccessHints(const char* displayName, int remainingDays);
