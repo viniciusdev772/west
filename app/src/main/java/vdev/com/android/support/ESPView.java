@@ -5,28 +5,33 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
-import android.os.Process;
 import android.util.AttributeSet;
 import android.util.DisplayMetrics;
-import android.util.Log;
 import android.view.View;
 
-public class ESPView extends View implements Runnable {
+public class ESPView extends View {
     public interface Renderer {
         void draw(ESPView view, Canvas canvas);
     }
 
-    public static int FPS = 30;
+    public static int FPS = 60;
 
-    private static final String TAG = "ESPView";
     private static volatile Renderer renderer;
 
     private final Paint filledPaint = new Paint();
     private final Paint strokePaint = new Paint();
     private final Paint textPaint = new Paint();
-    private final long sleepTime = 1000L / FPS;
-
-    private Thread renderThread;
+    private final Runnable frameTicker = new Runnable() {
+        @Override
+        public void run() {
+            if (!rendering) {
+                return;
+            }
+            postInvalidateOnAnimation();
+            scheduleNextFrame();
+        }
+    };
+    private boolean rendering = false;
 
     private native void DrawOn(Canvas canvas);
 
@@ -45,7 +50,6 @@ public class ESPView extends View implements Runnable {
         setFocusableInTouchMode(false);
         setClickable(false);
         setBackgroundColor(Color.TRANSPARENT);
-        startRenderThread();
     }
 
     public static void setRenderer(Renderer nextRenderer) {
@@ -74,31 +78,13 @@ public class ESPView extends View implements Runnable {
     }
 
     @Override
-    public void run() {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
-
-        while (renderThread != null && renderThread.isAlive() && !renderThread.isInterrupted()) {
-            try {
-                long frameStart = System.currentTimeMillis();
-                postInvalidate();
-                long frameCost = System.currentTimeMillis() - frameStart;
-                long delay = sleepTime - frameCost;
-                Thread.sleep(Math.max(1L, delay));
-            } catch (InterruptedException interruptedException) {
-                Thread.currentThread().interrupt();
-                Log.d(TAG, "ESP render thread interrupted", interruptedException);
-            } catch (Throwable throwable) {
-                Log.e(TAG, "ESP render loop error", throwable);
-            }
-        }
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        startRendering();
     }
 
     public void shutdown() {
-        Thread thread = renderThread;
-        renderThread = null;
-        if (thread != null) {
-            thread.interrupt();
-        }
+        stopRendering();
     }
 
     @Override
@@ -107,13 +93,23 @@ public class ESPView extends View implements Runnable {
         super.onDetachedFromWindow();
     }
 
-    private void startRenderThread() {
-        if (renderThread != null && renderThread.isAlive()) {
+    private void startRendering() {
+        if (rendering) {
             return;
         }
+        rendering = true;
+        scheduleNextFrame();
+    }
 
-        renderThread = new Thread(this, "esp-render");
-        renderThread.start();
+    private void stopRendering() {
+        rendering = false;
+        removeCallbacks(frameTicker);
+    }
+
+    private void scheduleNextFrame() {
+        removeCallbacks(frameTicker);
+        long frameDelay = FPS >= 60 ? 16L : Math.max(16L, 1000L / Math.max(1, FPS));
+        postDelayed(frameTicker, frameDelay);
     }
 
     private void initializePaints() {

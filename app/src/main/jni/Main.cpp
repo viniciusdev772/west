@@ -1368,13 +1368,18 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
 
         ResolveEspTypeColor(baseType, animalType, gunID, red, green, blue);
 
-        const float dx = enemyPos.x - myPos.x;
-        const float dy = enemyPos.y - myPos.y;
-        const float dz = enemyPos.z - myPos.z;
-        const float distance = std::sqrt((dx * dx) + (dy * dy) + (dz * dz));
+        float distance = 0.0f;
+        if (espShowLabel || espShowOffscreen360) {
+            const float dx = enemyPos.x - myPos.x;
+            const float dy = enemyPos.y - myPos.y;
+            const float dz = enemyPos.z - myPos.z;
+            distance = std::sqrt((dx * dx) + (dy * dy) + (dz * dz));
+        }
 
         char label[64] = {0};
-        std::snprintf(label, sizeof(label), "%s %.0fm", tag, distance);
+        if (espShowLabel) {
+            std::snprintf(label, sizeof(label), "%s %.0fm", tag, distance);
+        }
 
         bool drewOnScreenEsp = false;
         ScreenBox box{};
