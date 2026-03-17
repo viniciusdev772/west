@@ -1,11 +1,9 @@
 package vdev.com.android.support;
 
-import static java.lang.Thread.sleep;
-
 import android.annotation.SuppressLint;
 import android.content.Context;
-import android.content.Intent;
 import android.util.Log;
+
 import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -16,35 +14,41 @@ import java.util.concurrent.Executors;
 
 public class LibraryLoader {
 
+    public interface Listener {
+        void onLibraryReady(File file);
+        void onLibraryError(String message);
+    }
+
     private static final String TAG = "LibraryLoader";
-    public String GameActivity = "com.cg.cowboy.MainActivity";
 
-    // Baixa a biblioteca e a salva no armazenamento interno
     @SuppressLint("UnsafeDynamicallyLoadedCode")
-    public static void downloadAndLoadLibrary(Context context, String url, String libraryName) {
-        Executor executor = Executors.newSingleThreadExecutor(); // Criar um executor de thread única
+    public static void downloadAndLoadLibrary(Context context, String url, String libraryName, Listener listener) {
+        Executor executor = Executors.newSingleThreadExecutor();
 
-        executor.execute(() -> { // Executar a operação de download em uma thread separada
-            File file = new File(context.getFilesDir(), "lib.so");
-            if (downloadFile(url, file)) {
-                try {
-                    System.load(file.getAbsolutePath());
-                    sleep(100);
-                    Main.Start(context);
-                    context.startActivity(new Intent(context, Class.forName("com.cg.cowboy.MainActivity")));
-                    Log.i(TAG, "Biblioteca carregada com sucesso: " + libraryName);
-                } catch (UnsatisfiedLinkError e) {
-                    Log.e(TAG, "Erro ao carregar a biblioteca: " + e.getMessage());
-                } catch (InterruptedException | ClassNotFoundException e) {
-                    throw new RuntimeException(e);
+        executor.execute(() -> {
+            File file = new File(context.getFilesDir(), libraryName);
+            if (!downloadFile(url, file)) {
+                if (listener != null) {
+                    listener.onLibraryError("Download da biblioteca falhou.");
                 }
-            } else {
-                Log.e(TAG, "Download da biblioteca falhou.");
+                return;
+            }
+
+            try {
+                System.load(file.getAbsolutePath());
+                Log.i(TAG, "Biblioteca carregada com sucesso: " + libraryName);
+                if (listener != null) {
+                    listener.onLibraryReady(file);
+                }
+            } catch (UnsatisfiedLinkError error) {
+                Log.e(TAG, "Erro ao carregar a biblioteca: " + error.getMessage());
+                if (listener != null) {
+                    listener.onLibraryError("Falha ao carregar a biblioteca nativa.");
+                }
             }
         });
     }
 
-    // Função auxiliar para baixar um arquivo
     private static boolean downloadFile(String urlString, File destination) {
         try (BufferedInputStream in = new BufferedInputStream(new URL(urlString).openStream());
              FileOutputStream fileOutputStream = new FileOutputStream(destination)) {
@@ -54,8 +58,8 @@ public class LibraryLoader {
                 fileOutputStream.write(dataBuffer, 0, bytesRead);
             }
             return true;
-        } catch (IOException e) {
-            Log.e(TAG, "Erro ao baixar o arquivo: " + e.getMessage());
+        } catch (IOException error) {
+            Log.e(TAG, "Erro ao baixar o arquivo: " + error.getMessage());
             return false;
         }
     }

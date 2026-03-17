@@ -56,6 +56,7 @@ constexpr jint kHttpConnectTimeoutMs = 8000;
 constexpr jint kHttpReadTimeoutMs = 12000;
 char g_modSessionToken[256] = {0};
 char g_modDeviceFingerprint[128] = {0};
+char g_javaLoginError[kDialogTextCapacity] = {0};
 
 void ClearLoginRefs(JNIEnv* env);
 void ClearDialogRef(JNIEnv* env);
@@ -1740,4 +1741,36 @@ void ShowQueuedLibLoadDialog(JNIEnv* env, jobject context) {
 void ShowQueuedLibLoadDialogWithRegisteredContext(JNIEnv* env) {
     if (!env || !g_dialogContext) return;
     ShowQueuedLibLoadDialog(env, g_dialogContext);
+}
+
+const char* SubmitJavaLogin(JNIEnv* env, jobject context, const char* email, const char* password) {
+    if (!env || !context) {
+        return "Contexto de login invalido.";
+    }
+
+    RegisterDialogContext(env, context);
+    g_loginValidated = false;
+    g_validatedGeneration = 0;
+    ++g_loginGeneration;
+
+    const std::string safeEmail = email ? email : "";
+    const std::string safePassword = password ? password : "";
+    std::string failureReason;
+
+    const bool valid = PerformBackendLogin(env, context, safeEmail, safePassword, &failureReason);
+    if (valid) {
+        g_dialogPending = false;
+        g_dialogShown = true;
+        g_loginValidated = true;
+        g_validatedGeneration = g_loginGeneration;
+        g_javaLoginError[0] = '\0';
+        __android_log_print(ANDROID_LOG_INFO, "MOD_DIALOG", "Login Java validado com sucesso");
+        return nullptr;
+    }
+
+    CopyDialogText(g_javaLoginError, sizeof(g_javaLoginError),
+                   failureReason.empty() ? "Falha na autenticacao do mod." : failureReason.c_str(),
+                   "Falha na autenticacao do mod.");
+    __android_log_print(ANDROID_LOG_WARN, "MOD_DIALOG", "Login Java rejeitado: %s", g_javaLoginError);
+    return g_javaLoginError;
 }

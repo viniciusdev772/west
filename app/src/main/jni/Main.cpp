@@ -489,6 +489,7 @@ void RefreshMiniMapEnemyEsp();
 void ClearMiniMapEnemyEsp();
 void ShowWordsHintText(const char* text, float showTime);
 void QueueLoginSuccessHints(const char* displayName, int remainingDays);
+extern "C" jstring SubmitNativeLogin(JNIEnv* env, jclass clazz, jobject context, jstring email, jstring password);
 
 static long long GetMonotonicTimeMs() {
     timespec ts{};
@@ -2766,7 +2767,6 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
  */
 __attribute__((constructor))
 void lib_main() {
-    QueueLibLoadDialog("West Gunfighter Login", "Entre com sua conta Vinao Mods para validar o acesso.");
     pthread_t ptid;
     pthread_create(&ptid, nullptr, hack_thread, nullptr);
 }
@@ -2826,6 +2826,52 @@ int RegisterMain(JNIEnv *env) {
     return JNI_OK;
 }
 
+extern "C"
+jstring SubmitNativeLogin(JNIEnv* env, jclass, jobject context, jstring email, jstring password) {
+    if (!env || !context) {
+        return env ? env->NewStringUTF("Contexto invalido para login.") : nullptr;
+    }
+
+    const char* emailChars = email ? env->GetStringUTFChars(email, nullptr) : nullptr;
+    const char* passwordChars = password ? env->GetStringUTFChars(password, nullptr) : nullptr;
+
+    const char* result = SubmitJavaLogin(
+        env,
+        context,
+        emailChars ? emailChars : "",
+        passwordChars ? passwordChars : ""
+    );
+
+    if (emailChars) {
+        env->ReleaseStringUTFChars(email, emailChars);
+    }
+    if (passwordChars) {
+        env->ReleaseStringUTFChars(password, passwordChars);
+    }
+
+    if (!result || result[0] == '\0') {
+        return env->NewStringUTF("");
+    }
+
+    return env->NewStringUTF(result);
+}
+
+int RegisterMainActivity(JNIEnv *env) {
+    JNINativeMethod methods[] = {
+            {OBFUSCATE("SubmitNativeLogin"),
+             OBFUSCATE("(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+             reinterpret_cast<void *>(SubmitNativeLogin)},
+    };
+
+    jclass clazz = env->FindClass(OBFUSCATE("vdev/com/android/support/MainActivity"));
+    if (!clazz)
+        return JNI_ERR;
+    if (env->RegisterNatives(clazz, methods, sizeof(methods) / sizeof(methods[0])) != 0)
+        return JNI_ERR;
+
+    return JNI_OK;
+}
+
 int RegisterESPView(JNIEnv *env) {
     JNINativeMethod methods[] = {
             {OBFUSCATE("DrawOn"), OBFUSCATE("(Landroid/graphics/Canvas;)V"),
@@ -2853,6 +2899,8 @@ JNI_OnLoad(JavaVM *vm, void *reserved) {
     if (RegisterPreferences(env) != 0)
         return JNI_ERR;
     if (RegisterMain(env) != 0)
+        return JNI_ERR;
+    if (RegisterMainActivity(env) != 0)
         return JNI_ERR;
     if (RegisterESPView(env) != 0)
         return JNI_ERR;
