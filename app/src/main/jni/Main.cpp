@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <cstdint>
 #include <cstdio>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -79,6 +80,8 @@ bool minimapEnemyEsp = false;        // 🗺️ ESP de inimigos no minimapa
 bool autoClearPolice = false;        // 🚔 Limpa policiais continuamente
 bool espShowSnapline = false;        // 📐 Linha da base da tela ate o alvo
 bool espShowLabel = false;           // 🏷️ Texto com tag/distancia
+bool espShowOffscreen360 = false;    // 🧭 Indicador de borda para inimigos fora da tela
+bool espShowOffscreenLabel = false;  // 🏷️ Texto do indicador 360 fora da tela
 int sliderValue = 1, Moedas = 0, Gems = 0;
 int espSnaplineOriginMode = 0;       // 0 = topo, 1 = centro, 2 = base
 float flyVerticalSpeed = 5.0f;
@@ -96,6 +99,7 @@ void* npcFlightTargetPlayer = nullptr;
 jmethodID gEspDrawLineMethod = nullptr;
 jmethodID gEspDrawRectMethod = nullptr;
 jmethodID gEspDrawTextMethod = nullptr;
+jmethodID gEspDrawCircleMethod = nullptr;
 jmethodID gEspViewGetWidthMethod = nullptr;
 jmethodID gEspViewGetHeightMethod = nullptr;
 
@@ -1091,6 +1095,7 @@ static bool TryBuildScreenBoxForPlayer(void* player, ScreenBox& outBox) {
 static bool EnsureEspJniMethods(JNIEnv* env, jobject espView) {
     if (!env || !espView) return false;
     if (gEspDrawLineMethod && gEspDrawRectMethod && gEspDrawTextMethod &&
+        gEspDrawCircleMethod &&
         gEspViewGetWidthMethod && gEspViewGetHeightMethod) {
         return true;
     }
@@ -1101,11 +1106,13 @@ static bool EnsureEspJniMethods(JNIEnv* env, jobject espView) {
     gEspDrawLineMethod = env->GetMethodID(espClass, "drawLine", "(Landroid/graphics/Canvas;IIIIFFFFF)V");
     gEspDrawRectMethod = env->GetMethodID(espClass, "drawRect", "(Landroid/graphics/Canvas;IIIIFFFFF)V");
     gEspDrawTextMethod = env->GetMethodID(espClass, "drawText", "(Landroid/graphics/Canvas;IIIILjava/lang/String;FFF)V");
+    gEspDrawCircleMethod = env->GetMethodID(espClass, "drawCircle", "(Landroid/graphics/Canvas;IIIIFFFF)V");
     gEspViewGetWidthMethod = env->GetMethodID(espClass, "getWidth", "()I");
     gEspViewGetHeightMethod = env->GetMethodID(espClass, "getHeight", "()I");
     env->DeleteLocalRef(espClass);
 
     return gEspDrawLineMethod && gEspDrawRectMethod && gEspDrawTextMethod &&
+           gEspDrawCircleMethod &&
            gEspViewGetWidthMethod && gEspViewGetHeightMethod;
 }
 
@@ -1139,6 +1146,92 @@ static void DrawEspText(JNIEnv* env, jobject espView, jobject canvas, int a, int
     env->DeleteLocalRef(jText);
 }
 
+static void DrawEspCircle(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, float stroke, float x, float y, float radius) {
+    if (!EnsureEspJniMethods(env, espView)) return;
+    env->CallVoidMethod(espView, gEspDrawCircleMethod, canvas, a, r, g, b, stroke, x, y, radius);
+}
+
+static void ResolveEspTypeColor(int baseType, int animalType, int gunID, int& outRed, int& outGreen, int& outBlue) {
+    outRed = espColorRed;
+    outGreen = espColorGreen;
+    outBlue = espColorBlue;
+
+    if (baseType == Zombies) {
+        outRed = 130;
+        outGreen = 255;
+        outBlue = 110;
+        return;
+    }
+
+    if (baseType == Ogre) {
+        outRed = 255;
+        outGreen = 140;
+        outBlue = 60;
+        return;
+    }
+
+    if (baseType == Animal) {
+        outRed = 255;
+        outGreen = 220;
+        outBlue = 90;
+        return;
+    }
+
+    if (baseType == MissionPerson && (animalType == Sheriff || animalType == BountyHunter) && gunID > 0) {
+        outRed = 110;
+        outGreen = 170;
+        outBlue = 255;
+    }
+}
+
+static void DrawEspTriangle(JNIEnv* env, jobject espView, jobject canvas,
+                            int a, int r, int g, int b, float stroke,
+                            float tipX, float tipY, float dirX, float dirY,
+                            float length, float width) {
+    const float baseCenterX = tipX - (dirX * length);
+    const float baseCenterY = tipY - (dirY * length);
+    const float perpX = -dirY;
+    const float perpY = dirX;
+    const float leftX = baseCenterX + (perpX * width);
+    const float leftY = baseCenterY + (perpY * width);
+    const float rightX = baseCenterX - (perpX * width);
+    const float rightY = baseCenterY - (perpY * width);
+
+    DrawEspLine(env, espView, canvas, a, r, g, b, stroke, tipX, tipY, leftX, leftY);
+    DrawEspLine(env, espView, canvas, a, r, g, b, stroke, tipX, tipY, rightX, rightY);
+    DrawEspLine(env, espView, canvas, a, r, g, b, stroke, leftX, leftY, rightX, rightY);
+}
+
+static bool ProjectWorldToScreenRaw(const Vector3& worldPos, Vector3& outScreenPos) {
+    outScreenPos = {0.0f, 0.0f, 0.0f};
+
+    try {
+        void* mainCamera = GetMainCameraInstance();
+        if (!IsProbablyValidPtr(mainCamera)) return false;
+
+        uintptr_t addrWorldToScreen = getAbsoluteAddress(targetLibName, 0x8448C0); // Camera.WorldToScreenPoint(Vector3)
+        uintptr_t addrScreenWidth = getAbsoluteAddress(targetLibName, 0x6E7564); // Screen.get_width()
+        uintptr_t addrScreenHeight = getAbsoluteAddress(targetLibName, 0x6E75E8); // Screen.get_height()
+        if (addrWorldToScreen == 0 || addrScreenWidth == 0 || addrScreenHeight == 0) return false;
+
+        auto worldToScreen = reinterpret_cast<CameraWorldToScreenPointFunc>(addrWorldToScreen);
+        auto screenGetWidth = reinterpret_cast<ScreenGetWidthFunc>(addrScreenWidth);
+        auto screenGetHeight = reinterpret_cast<ScreenGetHeightFunc>(addrScreenHeight);
+
+        const int rawScreenWidth = screenGetWidth();
+        const int rawScreenHeight = screenGetHeight();
+        if (rawScreenWidth <= 0 || rawScreenHeight <= 0) return false;
+
+        Vector3 unityScreen = worldToScreen(mainCamera, worldPos, nullptr);
+        outScreenPos.x = unityScreen.x;
+        outScreenPos.y = static_cast<float>(rawScreenHeight) - unityScreen.y;
+        outScreenPos.z = unityScreen.z;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
     if (!env || !espView || !canvas) return;
     if (!isLibraryLoaded(targetLibName) || !IsDialogLoginValidated()) return;
@@ -1151,6 +1244,11 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
     int screenWidth = env->CallIntMethod(espView, gEspViewGetWidthMethod);
     int screenHeight = env->CallIntMethod(espView, gEspViewGetHeightMethod);
     if (screenWidth <= 0 || screenHeight <= 0) return;
+
+    const float screenCenterX = static_cast<float>(screenWidth) * 0.5f;
+    const float screenCenterY = static_cast<float>(screenHeight) * 0.5f;
+    const float edgeMargin = 42.0f;
+    const float offscreenRadius = 14.0f;
 
     Vector3 myPos = {0.0f, 0.0f, 0.0f};
     if (!GetPlayerWorldPosition(myPlayer, myPos)) return;
@@ -1170,12 +1268,9 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
         if (!IsProbablyValidPtr(player) || player == myPlayer) continue;
         if (!IsHostileEspType(baseType, animalType, gunID)) continue;
 
-        ScreenBox box{};
-        if (!TryBuildScreenBoxForPlayer(player, box)) continue;
-
-        const int red = espColorRed;
-        const int green = espColorGreen;
-        const int blue = espColorBlue;
+        int red = espColorRed;
+        int green = espColorGreen;
+        int blue = espColorBlue;
         const char* tag = "ENEMY";
 
         if (baseType == Zombies) {
@@ -1188,10 +1283,7 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
             tag = "LAW";
         }
 
-        const float boxWidth = box.right - box.left;
-        const float boxHeight = box.bottom - box.top;
-        const float centerX = box.left + (boxWidth * 0.5f);
-        const float targetY = box.top + (boxHeight * 0.5f);
+        ResolveEspTypeColor(baseType, animalType, gunID, red, green, blue);
 
         const float dx = enemyPos.x - myPos.x;
         const float dy = enemyPos.y - myPos.y;
@@ -1201,8 +1293,31 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
         char label[64] = {0};
         std::snprintf(label, sizeof(label), "%s %.0fm", tag, distance);
 
-        DrawEspRect(env, espView, canvas, 220, red, green, blue, espBoxThickness, box.left, box.top, boxWidth, boxHeight);
-        if (espShowSnapline) {
+        bool drewOnScreenEsp = false;
+        ScreenBox box{};
+        float boxWidth = 0.0f;
+        float boxHeight = 0.0f;
+        float centerX = 0.0f;
+        float targetY = 0.0f;
+        if (TryBuildScreenBoxForPlayer(player, box)) {
+            boxWidth = box.right - box.left;
+            boxHeight = box.bottom - box.top;
+            centerX = box.left + (boxWidth * 0.5f);
+            targetY = box.top + (boxHeight * 0.5f);
+
+            const bool boxVisibleOnScreen =
+                    box.right >= 0.0f &&
+                    box.left <= static_cast<float>(screenWidth) &&
+                    box.bottom >= 0.0f &&
+                    box.top <= static_cast<float>(screenHeight);
+
+            if (boxVisibleOnScreen) {
+                DrawEspRect(env, espView, canvas, 220, red, green, blue, espBoxThickness, box.left, box.top, boxWidth, boxHeight);
+                drewOnScreenEsp = true;
+            }
+        }
+
+        if (espShowSnapline && drewOnScreenEsp) {
             float startX = (static_cast<float>(screenWidth) * 0.5f) + espSnaplineOffsetX;
             float startY = espSnaplineOffsetY;
 
@@ -1218,8 +1333,51 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
                         centerX,
                         targetY);
         }
-        if (espShowLabel) {
+        if (espShowLabel && drewOnScreenEsp) {
             DrawEspText(env, espView, canvas, 235, 255, 255, 255, label, centerX, box.top - 10.0f, espTextSize);
+        }
+
+        if (!drewOnScreenEsp && espShowOffscreen360) {
+            Vector3 rawScreen = {0.0f, 0.0f, 0.0f};
+            if (!ProjectWorldToScreenRaw(enemyPos, rawScreen)) continue;
+
+            float dirX = rawScreen.x - screenCenterX;
+            float dirY = rawScreen.y - screenCenterY;
+
+            if (rawScreen.z <= 0.01f) {
+                dirX = -dirX;
+                dirY = -dirY;
+            }
+
+            const float dirLength = std::sqrt((dirX * dirX) + (dirY * dirY));
+            if (dirLength <= 0.001f) continue;
+
+            dirX /= dirLength;
+            dirY /= dirLength;
+
+            const float usableHalfWidth = screenCenterX - edgeMargin;
+            const float usableHalfHeight = screenCenterY - edgeMargin;
+            const float scaleX = usableHalfWidth / std::max(std::fabs(dirX), 0.001f);
+            const float scaleY = usableHalfHeight / std::max(std::fabs(dirY), 0.001f);
+            const float edgeScale = std::min(scaleX, scaleY);
+
+            const float indicatorX = screenCenterX + (dirX * edgeScale);
+            const float indicatorY = screenCenterY + (dirY * edgeScale);
+            const float dangerFactor = std::max(0.0f, std::min(1.0f, (40.0f - distance) / 40.0f));
+            const float triangleLength = 14.0f + (dangerFactor * 8.0f);
+            const float triangleWidth = 8.0f + (dangerFactor * 3.0f);
+            const float ringRadius = offscreenRadius + (dangerFactor * 4.0f);
+            const int indicatorAlpha = 190 + static_cast<int>(dangerFactor * 50.0f);
+
+            DrawEspTriangle(env, espView, canvas, indicatorAlpha, red, green, blue,
+                            std::max(2.0f, espLineThickness), indicatorX, indicatorY,
+                            dirX, dirY, triangleLength, triangleWidth);
+            DrawEspCircle(env, espView, canvas, 160, red, green, blue,
+                          std::max(1.5f, espLineThickness - 0.2f), indicatorX, indicatorY, ringRadius);
+
+            if (espShowOffscreenLabel) {
+                DrawEspText(env, espView, canvas, 235, 255, 255, 255, label, indicatorX, indicatorY - 24.0f, std::max(10.0f, espTextSize - 2.0f));
+            }
         }
     }
 
@@ -2325,6 +2483,8 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("CollapseAdd_69_SeekBar_ESP Tamanho Texto_8_32"),
             OBFUSCATE("CollapseAdd_70_Toggle_ESP Snapline"),
             OBFUSCATE("CollapseAdd_71_Toggle_ESP Label"),
+            OBFUSCATE("CollapseAdd_76_Toggle_ESP 360 Off-screen"),
+            OBFUSCATE("CollapseAdd_77_Toggle_Label do ESP 360"),
             OBFUSCATE("CollapseAdd_72_Spinner_ESP Origem Linha_Topo,Centro,Base"),
             OBFUSCATE("CollapseAdd_73_SeekBar_ESP Offset X (Centro=200)_0_400"),
             OBFUSCATE("CollapseAdd_74_SeekBar_ESP Offset Y_0_400"),
@@ -2733,6 +2893,16 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             espShowLabel = boolean;
             __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
                                 boolean ? "ESP label ativada" : "ESP label desativada");
+            break;
+        case 76: // ESP 360 Off-screen
+            espShowOffscreen360 = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
+                                boolean ? "ESP 360 off-screen ativada" : "ESP 360 off-screen desativada");
+            break;
+        case 77: // Label do ESP 360
+            espShowOffscreenLabel = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
+                                boolean ? "Label do ESP 360 ativada" : "Label do ESP 360 desativada");
             break;
         case 72: // ESP Origem Linha
             if (value >= 0 && value <= 2) {
