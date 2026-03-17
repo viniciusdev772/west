@@ -100,7 +100,9 @@ public class Menu {
     LinearLayout.LayoutParams scrlLLExpanded, scrlLL;
     WindowManager mWindowManager;
     WindowManager.LayoutParams vmParams;
+    WindowManager.LayoutParams espParams;
     ImageView startimage;
+    ESPView espView;
     FrameLayout rootFrame;
     ScrollView scrollView;
     boolean stopChecking, overlayRequired;
@@ -128,6 +130,7 @@ public class Menu {
         Preferences.context = context;
         rootFrame = new FrameLayout(context); // Global markup
         rootFrame.setOnTouchListener(onTouchListener());
+        espView = new ESPView(context);
         mRootContainer = new RelativeLayout(context); // Markup on which two markups of the icon and the menu itself will be placed
         mCollapsed = new RelativeLayout(context); // Markup of the icon (when the menu is minimized)
         mCollapsed.setVisibility(View.VISIBLE);
@@ -358,6 +361,7 @@ public class Menu {
         vmParams.y = POS_Y;
 
         mWindowManager = (WindowManager) getContext.getSystemService(Context.WINDOW_SERVICE);
+        attachEspOverlay(iparams);
         mWindowManager.addView(rootFrame, vmParams);
 
         overlayRequired = true;
@@ -382,7 +386,38 @@ public class Menu {
         vmParams.y = POS_Y;
 
         mWindowManager = ((Activity) getContext).getWindowManager();
+        attachEspOverlay(WindowManager.LayoutParams.TYPE_APPLICATION);
         mWindowManager.addView(rootFrame, vmParams);
+    }
+
+    private void attachEspOverlay(int type) {
+        if (mWindowManager == null || espView == null || espView.getParent() != null) {
+            return;
+        }
+
+        espParams = new WindowManager.LayoutParams(
+                MATCH_PARENT,
+                MATCH_PARENT,
+                type,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE |
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN |
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+        );
+        espParams.gravity = Gravity.TOP | Gravity.START;
+        espParams.x = 0;
+        espParams.y = 0;
+
+        mWindowManager.addView(espView, espParams);
+    }
+
+    public ESPView getEspView() {
+        return espView;
+    }
+
+    public void setEspRenderer(ESPView.Renderer renderer) {
+        ESPView.setRenderer(renderer);
     }
 
     private View.OnTouchListener onTouchListener() {
@@ -1051,8 +1086,19 @@ public class Menu {
     }
 
     public void onDestroy() {
+        ESPView.clearRenderer();
+        if (espView != null) {
+            try {
+                espView.shutdown();
+                if (espView.getParent() != null && mWindowManager != null) {
+                    mWindowManager.removeView(espView);
+                }
+            } catch (Exception ignored) {
+            }
+        }
         if (rootFrame != null) {
             // mWindowManager.removeView(rootFrame);
+            rootFrame.removeAllViews();
         }
     }
 }

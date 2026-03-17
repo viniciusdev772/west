@@ -71,16 +71,33 @@ bool alwaysHeadshot = false;         // 💀 Força todos os tiros como headshot
 bool flyMode = false;                // 🕊️ Modo voo experimental
 bool npcFlyMode = false;             // ☁️ Levita NPCs hostis usando o mesmo Player da dump
 bool npcWarMode = false;             // ⚔️ Faz NPCs hostis entrarem em conflito entre si
+bool espCanvas = false;              // 🖼️ ESP desenhada via ESPView Java
 bool completeEsp = false;            // 👁️ ESP completo com barras de vida
 bool autoKill = false;               // ☠️ Mata inimigos ativos com BeHit
 bool bulletTailEsp = false;          // 🔫 Desenha trilhas de tiro em NPCs armados
 bool minimapEnemyEsp = false;        // 🗺️ ESP de inimigos no minimapa
 bool autoClearPolice = false;        // 🚔 Limpa policiais continuamente
+bool espShowSnapline = false;        // 📐 Linha da base da tela ate o alvo
+bool espShowLabel = false;           // 🏷️ Texto com tag/distancia
 int sliderValue = 1, Moedas = 0, Gems = 0;
+int espSnaplineOriginMode = 0;       // 0 = topo, 1 = centro, 2 = base
 float flyVerticalSpeed = 5.0f;
 float flyHeightStep = 1.0f;
 float npcFlyLift = 1.2f;
+float espBoxThickness = 2.0f;
+float espLineThickness = 1.4f;
+float espTextSize = 18.0f;
+float espSnaplineOffsetX = 0.0f;
+float espSnaplineOffsetY = 30.0f;
+int espColorRed = 255;
+int espColorGreen = 90;
+int espColorBlue = 90;
 void* npcFlightTargetPlayer = nullptr;
+jmethodID gEspDrawLineMethod = nullptr;
+jmethodID gEspDrawRectMethod = nullptr;
+jmethodID gEspDrawTextMethod = nullptr;
+jmethodID gEspViewGetWidthMethod = nullptr;
+jmethodID gEspViewGetHeightMethod = nullptr;
 
 // Ações pendentes para execução em contexto de jogo
 volatile bool pendingCreateMissionHints = false;
@@ -498,6 +515,7 @@ bool WorldToScreen(const Vector3& worldPos, Vector3& outScreenPos);
 bool ProjectPlayerScreenAnchors(void* player, Vector3& outHeadScreen, Vector3& outRootScreen);
 void LogWorldToScreenSamples();
 void RefreshTargetMarkerESP();
+void DrawOn(JNIEnv* env, jobject espView, jobject canvas);
 void ApplyFlyMovementFrame(void* myCtrlPlayer);
 void ApplyEnemyFlyMovementFrame();
 void SetEnemyFlightState(bool enabled);
@@ -525,6 +543,11 @@ static bool IsTeleportHostileType(int baseType, int animalType, int gunID);
 static void* ResolvePlayerFromTrackedTransform(void* targetTransform);
 static void* ResolveTeleportTargetPlayer(int requestMode);
 static bool TeleportMyPlayerNearTarget(void* targetPlayer, const char* reasonText);
+static bool EnsureEspJniMethods(JNIEnv* env, jobject espView);
+static bool IsHostileEspType(int baseType, int animalType, int gunID);
+static void DrawEspLine(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, float stroke, float fromX, float fromY, float toX, float toY);
+static void DrawEspRect(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, float stroke, float x, float y, float width, float height);
+static void DrawEspText(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, const char* text, float x, float y, float size);
 
 bool IsValidAimTransform(void* target, void* playerCtrl) {
     if (!target || target == playerCtrl) return false;
@@ -797,11 +820,34 @@ void* ResolveBestAggressiveAimTarget(void* myCtrlPlayer) {
         if (!GetPlayerWorldPosition(myPlayer, myPos)) return nullptr;
 
         if (IsProbablyValidPtr(lockedTargetPlayer) && lockedFramesLeft > 0) {
+            int lockedBaseType = -1;
+            int lockedAnimalType = -1;
+            int lockedGunID = 0;
+            Vector3 lockedPos = {0.0f, 0.0f, 0.0f};
+            const bool lockedStillAlive = ResolvePlayerMetaFromPlayer(
+                lockedTargetPlayer,
+                lockedBaseType,
+                lockedAnimalType,
+                lockedGunID,
+                &lockedPos
+            );
+            const int lockedScore = lockedStillAlive
+                ? GetAggressivePriorityScore(lockedBaseType, lockedAnimalType, lockedGunID)
+                : -1;
+
             void* lockedTransform = GetPreferredAimTransformFromPlayer(lockedTargetPlayer);
-            if (IsProbablyValidPtr(lockedTransform) && CanAttackTargetTransform(myCtrlPlayer, lockedTransform)) {
+            if (
+                lockedStillAlive &&
+                lockedScore >= 0 &&
+                IsProbablyValidPtr(lockedTransform) &&
+                CanAttackTargetTransform(myCtrlPlayer, lockedTransform)
+            ) {
                 lockedFramesLeft--;
                 return lockedTransform;
             }
+
+            lockedTargetPlayer = nullptr;
+            lockedFramesLeft = 0;
         }
 
         void* enemies[128] = {};
@@ -1039,6 +1085,146 @@ static bool TryBuildScreenBoxForPlayer(void* player, ScreenBox& outBox) {
     outBox.top = headScreen.y;
     outBox.bottom = rootScreen.y;
     return true;
+}
+
+static bool EnsureEspJniMethods(JNIEnv* env, jobject espView) {
+    if (!env || !espView) return false;
+    if (gEspDrawLineMethod && gEspDrawRectMethod && gEspDrawTextMethod &&
+        gEspViewGetWidthMethod && gEspViewGetHeightMethod) {
+        return true;
+    }
+
+    jclass espClass = env->GetObjectClass(espView);
+    if (!espClass) return false;
+
+    gEspDrawLineMethod = env->GetMethodID(espClass, "drawLine", "(Landroid/graphics/Canvas;IIIIFFFFF)V");
+    gEspDrawRectMethod = env->GetMethodID(espClass, "drawRect", "(Landroid/graphics/Canvas;IIIIFFFFF)V");
+    gEspDrawTextMethod = env->GetMethodID(espClass, "drawText", "(Landroid/graphics/Canvas;IIIILjava/lang/String;FFF)V");
+    gEspViewGetWidthMethod = env->GetMethodID(espClass, "getWidth", "()I");
+    gEspViewGetHeightMethod = env->GetMethodID(espClass, "getHeight", "()I");
+    env->DeleteLocalRef(espClass);
+
+    return gEspDrawLineMethod && gEspDrawRectMethod && gEspDrawTextMethod &&
+           gEspViewGetWidthMethod && gEspViewGetHeightMethod;
+}
+
+static bool IsHostileEspType(int baseType, int animalType, int gunID) {
+    if (baseType == EnemyNPC) return true;
+    if (baseType == Zombies || baseType == Ogre) return true;
+    if (baseType == MissionPerson && (animalType == Sheriff || animalType == BountyHunter) && gunID > 0) return true;
+    if (baseType == Animal) {
+        return animalType == Cheetah || animalType == Bear ||
+               animalType == Wolf01 || animalType == Wolf02 || animalType == Wolf03;
+    }
+    return false;
+}
+
+static void DrawEspLine(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, float stroke, float fromX, float fromY, float toX, float toY) {
+    if (!EnsureEspJniMethods(env, espView)) return;
+    env->CallVoidMethod(espView, gEspDrawLineMethod, canvas, a, r, g, b, stroke, fromX, fromY, toX, toY);
+}
+
+static void DrawEspRect(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, float stroke, float x, float y, float width, float height) {
+    if (!EnsureEspJniMethods(env, espView)) return;
+    env->CallVoidMethod(espView, gEspDrawRectMethod, canvas, a, r, g, b, stroke, x, y, width, height);
+}
+
+static void DrawEspText(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, const char* text, float x, float y, float size) {
+    if (!EnsureEspJniMethods(env, espView) || !text) return;
+
+    jstring jText = env->NewStringUTF(text);
+    if (!jText) return;
+    env->CallVoidMethod(espView, gEspDrawTextMethod, canvas, a, r, g, b, jText, x, y, size);
+    env->DeleteLocalRef(jText);
+}
+
+void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
+    if (!env || !espView || !canvas) return;
+    if (!isLibraryLoaded(targetLibName) || !IsDialogLoginValidated()) return;
+    if (!espCanvas) return;
+    if (!EnsureEspJniMethods(env, espView)) return;
+
+    void* myPlayer = GetMyPlayerInstance();
+    if (!IsProbablyValidPtr(myPlayer)) return;
+
+    int screenWidth = env->CallIntMethod(espView, gEspViewGetWidthMethod);
+    int screenHeight = env->CallIntMethod(espView, gEspViewGetHeightMethod);
+    if (screenWidth <= 0 || screenHeight <= 0) return;
+
+    Vector3 myPos = {0.0f, 0.0f, 0.0f};
+    if (!GetPlayerWorldPosition(myPlayer, myPos)) return;
+
+    void* enemies[256] = {};
+    int enemyCount = CollectActiveEnemyBases(enemies, 256);
+    for (int i = 0; i < enemyCount; ++i) {
+        void* enemyBase = enemies[i];
+        if (!IsProbablyValidPtr(enemyBase)) continue;
+
+        void* player = nullptr;
+        int baseType = -1;
+        int animalType = -1;
+        int gunID = 0;
+        Vector3 enemyPos = {0.0f, 0.0f, 0.0f};
+        if (!ResolveCombatData(enemyBase, &player, baseType, animalType, gunID, enemyPos)) continue;
+        if (!IsProbablyValidPtr(player) || player == myPlayer) continue;
+        if (!IsHostileEspType(baseType, animalType, gunID)) continue;
+
+        ScreenBox box{};
+        if (!TryBuildScreenBoxForPlayer(player, box)) continue;
+
+        const int red = espColorRed;
+        const int green = espColorGreen;
+        const int blue = espColorBlue;
+        const char* tag = "ENEMY";
+
+        if (baseType == Zombies) {
+            tag = "ZOMBIE";
+        } else if (baseType == Ogre) {
+            tag = "OGRE";
+        } else if (baseType == Animal) {
+            tag = "ANIMAL";
+        } else if (baseType == MissionPerson) {
+            tag = "LAW";
+        }
+
+        const float boxWidth = box.right - box.left;
+        const float boxHeight = box.bottom - box.top;
+        const float centerX = box.left + (boxWidth * 0.5f);
+        const float targetY = box.top + (boxHeight * 0.5f);
+
+        const float dx = enemyPos.x - myPos.x;
+        const float dy = enemyPos.y - myPos.y;
+        const float dz = enemyPos.z - myPos.z;
+        const float distance = std::sqrt((dx * dx) + (dy * dy) + (dz * dz));
+
+        char label[64] = {0};
+        std::snprintf(label, sizeof(label), "%s %.0fm", tag, distance);
+
+        DrawEspRect(env, espView, canvas, 220, red, green, blue, espBoxThickness, box.left, box.top, boxWidth, boxHeight);
+        if (espShowSnapline) {
+            float startX = (static_cast<float>(screenWidth) * 0.5f) + espSnaplineOffsetX;
+            float startY = espSnaplineOffsetY;
+
+            if (espSnaplineOriginMode == 1) {
+                startY = (static_cast<float>(screenHeight) * 0.5f) + espSnaplineOffsetY;
+            } else if (espSnaplineOriginMode == 2) {
+                startY = static_cast<float>(screenHeight) - espSnaplineOffsetY;
+            }
+
+            DrawEspLine(env, espView, canvas, 150, red, green, blue, espLineThickness,
+                        startX,
+                        startY,
+                        centerX,
+                        targetY);
+        }
+        if (espShowLabel) {
+            DrawEspText(env, espView, canvas, 235, 255, 255, 255, label, centerX, box.top - 10.0f, espTextSize);
+        }
+    }
+
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
 }
 
 static float Vector3LengthXZ(const Vector3& value) {
@@ -1842,6 +2028,7 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
             flyMode = false;
             npcFlyMode = false;
             npcWarMode = false;
+            espCanvas = false;
             completeEsp = false;
             autoKill = false;
             bulletTailEsp = false;
@@ -2104,65 +2291,88 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     ShowQueuedLibLoadDialog(env, context);
 
     const char *features[] = {
-            // Recursos originais
             OBFUSCATE("Category_Menu de Modificações"),
-            OBFUSCATE("4_Toggle_Vida Infinita (15/02/2026)"),
-            OBFUSCATE("1_SeekBar_Dano de bala (15/02/2026)_1_999"),
-            OBFUSCATE("2_InputValue_Adicionar Moedas (15/02/2026)"),
-            OBFUSCATE("3_InputValue_Adicionar Gems (15/02/2026)"),
-            OBFUSCATE("5_SeekBar_Balas das Armas (15/02/2026)_1_999999"),
+            OBFUSCATE("Collapse_Player e Recursos_True"),
+            OBFUSCATE("CollapseAdd_Category_Player e Recursos"),
+            OBFUSCATE("CollapseAdd_4_Toggle_Vida Infinita (15/02/2026)"),
+            OBFUSCATE("CollapseAdd_1_SeekBar_Dano de bala (15/02/2026)_1_999"),
+            OBFUSCATE("CollapseAdd_2_InputValue_Adicionar Moedas (15/02/2026)"),
+            OBFUSCATE("CollapseAdd_3_InputValue_Adicionar Gems (15/02/2026)"),
+            OBFUSCATE("CollapseAdd_5_SeekBar_Balas das Armas (15/02/2026)_1_999999"),
 
-            // Gerenciamento de itens
-            OBFUSCATE("Category_Gerenciamento de Itens"),
-            OBFUSCATE("12_Button_Adicionar Todas as Partes de Armas (15/02/2026)"),
-            OBFUSCATE("13_Button_Adicionar Todas as Peles (15/02/2026)"),
-            OBFUSCATE("14_Button_Adicionar 10 Whisky (15/02/2026)"),
+            OBFUSCATE("Collapse_Itens_True"),
+            OBFUSCATE("CollapseAdd_Category_Itens"),
+            OBFUSCATE("CollapseAdd_12_Button_Adicionar Todas as Partes de Armas (15/02/2026)"),
+            OBFUSCATE("CollapseAdd_13_Button_Adicionar Todas as Peles (15/02/2026)"),
+            OBFUSCATE("CollapseAdd_14_Button_Adicionar 10 Whisky (15/02/2026)"),
 
-            // Sistema de mira
-            OBFUSCATE("Category_Sistema de Mira"),
-            OBFUSCATE("35_Toggle_AimBot Agressivo (15/02/2026)"),
-            OBFUSCATE("22_Toggle_Sempre Headshot (15/02/2026)"),
+            OBFUSCATE("Collapse_Combate_True"),
+            OBFUSCATE("CollapseAdd_Category_Combate"),
+            OBFUSCATE("CollapseAdd_35_Toggle_AimBot Agressivo (15/02/2026)"),
+            OBFUSCATE("CollapseAdd_22_Toggle_Sempre Headshot (15/02/2026)"),
+            OBFUSCATE("CollapseAdd_43_Toggle_Auto Kill Seguro (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_44_Button_Kill All Agora (08/03/2026)"),
 
-            // Sistema Policial
-            OBFUSCATE("Category_Sistema Policial"),
-            OBFUSCATE("58_Button_Matar Somente Policiais (08/03/2026)"),
-            OBFUSCATE("59_Toggle_Auto Limpar Policiais (08/03/2026)"),
-            
-            // Modo voo (experimental)
-            OBFUSCATE("Category_Modo Voo"),
-            OBFUSCATE("32_Toggle_Modo Voo (Experimental) (15/02/2026)"),
-            OBFUSCATE("33_SeekBar_Velocidade Vertical_1_20"),
-            OBFUSCATE("34_SeekBar_Ganho de Altura_1_50"),
-            OBFUSCATE("50_Toggle_NPCs Hostis Voadores (08/03/2026)"),
-            OBFUSCATE("51_SeekBar_Intensidade do Voo NPC_1_30"),
-            OBFUSCATE("Category_Chaos"),
-            OBFUSCATE("52_Button_Chaos Time (08/03/2026)"),
-            OBFUSCATE("53_Button_Chaos Spawn (08/03/2026)"),
-            OBFUSCATE("54_Button_Chaos UI (08/03/2026)"),
-            OBFUSCATE("55_Button_Chaos Weapon (08/03/2026)"),
-            OBFUSCATE("56_Toggle_NPC War Entre Hostis (08/03/2026)"),
-            OBFUSCATE("57_Button_Chaos FX (08/03/2026)"),
+            OBFUSCATE("Collapse_ESP Canvas_True"),
+            OBFUSCATE("CollapseAdd_Category_ESP Canvas"),
+            OBFUSCATE("CollapseAdd_75_Toggle_ESP Canvas (Overlay Java)"),
+            OBFUSCATE("CollapseAdd_64_SeekBar_ESP Vermelho_0_255"),
+            OBFUSCATE("CollapseAdd_65_SeekBar_ESP Verde_0_255"),
+            OBFUSCATE("CollapseAdd_66_SeekBar_ESP Azul_0_255"),
+            OBFUSCATE("CollapseAdd_67_SeekBar_ESP Espessura Box_1_8"),
+            OBFUSCATE("CollapseAdd_68_SeekBar_ESP Espessura Linha_1_8"),
+            OBFUSCATE("CollapseAdd_69_SeekBar_ESP Tamanho Texto_8_32"),
+            OBFUSCATE("CollapseAdd_70_Toggle_ESP Snapline"),
+            OBFUSCATE("CollapseAdd_71_Toggle_ESP Label"),
+            OBFUSCATE("CollapseAdd_72_Spinner_ESP Origem Linha_Topo,Centro,Base"),
+            OBFUSCATE("CollapseAdd_73_SeekBar_ESP Offset X (Centro=200)_0_400"),
+            OBFUSCATE("CollapseAdd_74_SeekBar_ESP Offset Y_0_400"),
 
-            // Visual do jogo
-            OBFUSCATE("Category_Visual do Jogo"),
-            OBFUSCATE("36_Button_Criar Mission Hints Visuais (08/03/2026)"),
-            OBFUSCATE("37_Button_Remover Mission Hints Visuais (08/03/2026)"),
-            OBFUSCATE("38_Button_Mostrar Marcador no Alvo Atual (08/03/2026)"),
-            OBFUSCATE("39_Button_Ocultar Marcador do Alvo (08/03/2026)"),
-            OBFUSCATE("40_Toggle_ESP Completo (Barras de Vida) (08/03/2026)"),
-            OBFUSCATE("41_Button_Atualizar ESP Agora (08/03/2026)"),
-            OBFUSCATE("43_Toggle_Auto Kill Seguro (08/03/2026)"),
-            OBFUSCATE("44_Button_Kill All Agora (08/03/2026)"),
-            OBFUSCATE("45_Toggle_Trilhas de Tiro em Todos os Alvos (08/03/2026)"),
-            OBFUSCATE("46_Button_Limpar Trilhas de Tiro (08/03/2026)"),
-            OBFUSCATE("47_Toggle_ESP Inimigos no Minimapa (08/03/2026)"),
-            OBFUSCATE("48_Button_Mostrar Texto de Teste (08/03/2026)"),
-            OBFUSCATE("49_InputText_Mostrar Texto Custom (08/03/2026)"),
-            OBFUSCATE("Category_Teleport"),
-            OBFUSCATE("60_Button_Teleportar Para Alvo Atual (10/03/2026)"),
-            OBFUSCATE("61_Button_Teleportar Para Hostil Mais Proximo (10/03/2026)"),
-            OBFUSCATE("62_Button_Teleportar Para NPC de Missao (10/03/2026)"),
-            OBFUSCATE("63_Button_Teleportar Para NPC do Mapa (10/03/2026)"),
+            OBFUSCATE("Collapse_ESP Nativa_True"),
+            OBFUSCATE("CollapseAdd_Category_ESP Nativa"),
+            OBFUSCATE("CollapseAdd_40_Toggle_ESP Completo (Barras de Vida) (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_41_Button_Atualizar ESP Agora (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_47_Toggle_ESP Inimigos no Minimapa (08/03/2026)"),
+
+            OBFUSCATE("Collapse_Visual e UI_True"),
+            OBFUSCATE("CollapseAdd_Category_Visual e UI"),
+            OBFUSCATE("CollapseAdd_36_Button_Criar Mission Hints Visuais (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_37_Button_Remover Mission Hints Visuais (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_38_Button_Mostrar Marcador no Alvo Atual (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_39_Button_Ocultar Marcador do Alvo (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_45_Toggle_Trilhas de Tiro em Todos os Alvos (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_46_Button_Limpar Trilhas de Tiro (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_48_Button_Mostrar Texto de Teste (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_49_InputText_Mostrar Texto Custom (08/03/2026)"),
+
+            OBFUSCATE("Collapse_Movimento_True"),
+            OBFUSCATE("CollapseAdd_Category_Movimento"),
+            OBFUSCATE("CollapseAdd_32_Toggle_Modo Voo (Experimental) (15/02/2026)"),
+            OBFUSCATE("CollapseAdd_33_SeekBar_Velocidade Vertical_1_20"),
+            OBFUSCATE("CollapseAdd_34_SeekBar_Ganho de Altura_1_50"),
+            OBFUSCATE("CollapseAdd_50_Toggle_NPCs Hostis Voadores (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_51_SeekBar_Intensidade do Voo NPC_1_30"),
+
+            OBFUSCATE("Collapse_Policia_True"),
+            OBFUSCATE("CollapseAdd_Category_Policia"),
+            OBFUSCATE("CollapseAdd_58_Button_Matar Somente Policiais (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_59_Toggle_Auto Limpar Policiais (08/03/2026)"),
+
+            OBFUSCATE("Collapse_Teleport_True"),
+            OBFUSCATE("CollapseAdd_Category_Teleport"),
+            OBFUSCATE("CollapseAdd_60_Button_Teleportar Para Alvo Atual (10/03/2026)"),
+            OBFUSCATE("CollapseAdd_61_Button_Teleportar Para Hostil Mais Proximo (10/03/2026)"),
+            OBFUSCATE("CollapseAdd_62_Button_Teleportar Para NPC de Missao (10/03/2026)"),
+            OBFUSCATE("CollapseAdd_63_Button_Teleportar Para NPC do Mapa (10/03/2026)"),
+
+            OBFUSCATE("Collapse_Chaos_True"),
+            OBFUSCATE("CollapseAdd_Category_Chaos"),
+            OBFUSCATE("CollapseAdd_52_Button_Chaos Time (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_53_Button_Chaos Spawn (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_54_Button_Chaos UI (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_55_Button_Chaos Weapon (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_56_Toggle_NPC War Entre Hostis (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_57_Button_Chaos FX (08/03/2026)"),
     };
 
     int Total_Feature = (sizeof features / sizeof features[0]);
@@ -2472,6 +2682,81 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
                 __android_log_print(ANDROID_LOG_WARN, "MOD_VISUAL", "Texto custom ignorado: jstring nula");
             }
             break;
+        case 75: // ESP Canvas
+            espCanvas = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
+                                boolean ? "ESP canvas ativada" : "ESP canvas desativada");
+            break;
+        case 64: // ESP Vermelho
+            if (value >= 0 && value <= 255) {
+                espColorRed = value;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP vermelho ajustado para: %d", espColorRed);
+            }
+            break;
+        case 65: // ESP Verde
+            if (value >= 0 && value <= 255) {
+                espColorGreen = value;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP verde ajustado para: %d", espColorGreen);
+            }
+            break;
+        case 66: // ESP Azul
+            if (value >= 0 && value <= 255) {
+                espColorBlue = value;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP azul ajustado para: %d", espColorBlue);
+            }
+            break;
+        case 67: // ESP Espessura Box
+            if (value >= 1 && value <= 8) {
+                espBoxThickness = static_cast<float>(value);
+                __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP box thickness ajustada para: %.1f", espBoxThickness);
+            }
+            break;
+        case 68: // ESP Espessura Linha
+            if (value >= 1 && value <= 8) {
+                espLineThickness = static_cast<float>(value);
+                __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP line thickness ajustada para: %.1f", espLineThickness);
+            }
+            break;
+        case 69: // ESP Tamanho Texto
+            if (value >= 8 && value <= 32) {
+                espTextSize = static_cast<float>(value);
+                __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP text size ajustado para: %.1f", espTextSize);
+            }
+            break;
+        case 70: // ESP Snapline
+            espShowSnapline = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
+                                boolean ? "ESP snapline ativada" : "ESP snapline desativada");
+            break;
+        case 71: // ESP Label
+            espShowLabel = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
+                                boolean ? "ESP label ativada" : "ESP label desativada");
+            break;
+        case 72: // ESP Origem Linha
+            if (value >= 0 && value <= 2) {
+                espSnaplineOriginMode = value;
+                const char* originText = "topo";
+                if (value == 1) {
+                    originText = "centro";
+                } else if (value == 2) {
+                    originText = "base";
+                }
+                __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP origem da linha ajustada para: %s", originText);
+            }
+            break;
+        case 73: // ESP Offset X
+            if (value >= 0 && value <= 400) {
+                espSnaplineOffsetX = static_cast<float>(value - 200);
+                __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP offset X ajustado para: %.1f", espSnaplineOffsetX);
+            }
+            break;
+        case 74: // ESP Offset Y
+            if (value >= 0 && value <= 400) {
+                espSnaplineOffsetY = static_cast<float>(value);
+                __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP offset Y ajustado para: %.1f", espSnaplineOffsetY);
+            }
+            break;
     }
 }
 
@@ -2541,6 +2826,19 @@ int RegisterMain(JNIEnv *env) {
     return JNI_OK;
 }
 
+int RegisterESPView(JNIEnv *env) {
+    JNINativeMethod methods[] = {
+            {OBFUSCATE("DrawOn"), OBFUSCATE("(Landroid/graphics/Canvas;)V"),
+             reinterpret_cast<void *>(DrawOn)},
+    };
+    jclass clazz = env->FindClass(OBFUSCATE("vdev/com/android/support/ESPView"));
+    if (!clazz)
+        return JNI_ERR;
+    if (env->RegisterNatives(clazz, methods, sizeof(methods) / sizeof(methods[0])) != 0)
+        return JNI_ERR;
+    return JNI_OK;
+}
+
 /**
  * Ponto de entrada JNI
  * Registra todas as classes nativas
@@ -2555,6 +2853,8 @@ JNI_OnLoad(JavaVM *vm, void *reserved) {
     if (RegisterPreferences(env) != 0)
         return JNI_ERR;
     if (RegisterMain(env) != 0)
+        return JNI_ERR;
+    if (RegisterESPView(env) != 0)
         return JNI_ERR;
     return JNI_VERSION_1_6;
 }
@@ -3165,16 +3465,25 @@ void RefreshCompleteESP() {
 
         destroyAllBlood(bloodFactory, nullptr);
 
-        void* players[128] = {};
-        int playerCount = CollectTrackedPlayers(players, 128);
-        if (playerCount <= 0) return;
+        void* enemies[128] = {};
+        int enemyCount = CollectActiveEnemyBases(enemies, 128);
+        if (enemyCount <= 0) return;
 
         void* myPlayer = GetMyPlayerInstance();
         int applied = 0;
 
-        for (int i = 0; i < playerCount; ++i) {
-            void* player = players[i];
+        for (int i = 0; i < enemyCount; ++i) {
+            void* enemyBase = enemies[i];
+            if (!IsProbablyValidPtr(enemyBase)) continue;
+
+            void* player = nullptr;
+            int baseType = -1;
+            int animalType = -1;
+            int gunID = 0;
+            Vector3 enemyPos = {0.0f, 0.0f, 0.0f};
+            if (!ResolveCombatData(enemyBase, &player, baseType, animalType, gunID, enemyPos)) continue;
             if (!IsProbablyValidPtr(player) || player == myPlayer) continue;
+            if (!IsHostileEspType(baseType, animalType, gunID)) continue;
 
             void* target = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0x3C); // Player.Head
             if (!IsProbablyValidPtr(target)) {

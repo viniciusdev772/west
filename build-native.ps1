@@ -122,8 +122,9 @@ sdk.dir=$sdkPath
 # Determinar o tipo de build
 $buildType = if ($Release) { "Release" } else { "Debug" }
 $gradleTask = if ($Release) { ":app:externalNativeBuildRelease" } else { ":app:externalNativeBuildDebug" }
+$assembleTask = if ($Release) { ":app:assembleRelease" } else { ":app:assembleDebug" }
 
-Write-Host "Iniciando build nativo (.so) ($buildType)..." -ForegroundColor Cyan
+Write-Host "Iniciando build nativo (.so) + APK ($buildType)..." -ForegroundColor Cyan
 Write-Host ""
 
 # Executar clean se solicitado
@@ -138,7 +139,7 @@ if ($Clean) {
 }
 
 # Executar build principal
-$gradleArgs = @($gradleTask)
+$gradleArgs = @($gradleTask, $assembleTask)
 if ($Verbose) {
     $gradleArgs += "--info"
 }
@@ -166,8 +167,12 @@ Write-Host "============================================" -ForegroundColor Green
 Write-Host ""
 
 # Mostrar apenas o .so mais recente
-Write-Host "Procurando biblioteca compilada mais recente..." -ForegroundColor Cyan
+Write-Host "Procurando artefatos compilados mais recentes..." -ForegroundColor Cyan
 $latestSo = Get-ChildItem -Path "app\build" -Filter "*.so" -Recurse -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+$latestApk = Get-ChildItem -Path "app\build\outputs\apk" -Filter "*.apk" -Recurse -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 
@@ -178,6 +183,13 @@ if ($latestSo) {
     Write-Host "Nenhuma biblioteca .so encontrada no diretório de build" -ForegroundColor Yellow
     Read-Host "Pressione Enter para sair"
     exit 1
+}
+
+if ($latestApk) {
+    Write-Host "APK mais recente: $($latestApk.FullName)" -ForegroundColor Green
+    Write-Host "APK modificado: $($latestApk.LastWriteTime)" -ForegroundColor Gray
+} else {
+    Write-Host "Nenhum APK encontrado em app\build\outputs\apk" -ForegroundColor Yellow
 }
 
 try {
@@ -194,9 +206,11 @@ try {
 }
 
 Write-Host ""
-Write-Host "A biblioteca nativa foi compilada com sucesso!" -ForegroundColor Green
+Write-Host "A biblioteca nativa e o APK foram gerados com sucesso!" -ForegroundColor Green
 if ($latestSo) { Write-Host "Biblioteca .so mais recente: $($latestSo.FullName)" -ForegroundColor White }
+if ($latestApk) { Write-Host "APK gerado localmente: $($latestApk.FullName)" -ForegroundColor White }
 Write-Host "Upload para API v11: concluido" -ForegroundColor White
+Write-Host "Upload de APK: nao executado" -ForegroundColor White
 Write-Host ""
 
 # Mostrar opções de uso
