@@ -78,8 +78,10 @@ bool autoKill = false;               // ☠️ Mata inimigos ativos com BeHit
 bool bulletTailEsp = false;          // 🔫 Desenha trilhas de tiro em NPCs armados
 bool minimapEnemyEsp = false;        // 🗺️ ESP de inimigos no minimapa
 bool autoClearPolice = false;        // 🚔 Limpa policiais continuamente
+bool espShowBox = true;              // ⬛ Caixa 2D do ESP canvas
 bool espShowSnapline = false;        // 📐 Linha da base da tela ate o alvo
 bool espShowLabel = false;           // 🏷️ Texto com tag/distancia
+bool espShowSkeleton = false;        // 🦴 Esqueleto 2D usando os bones expostos no Player
 bool espShowOffscreen360 = false;    // 🧭 Indicador de borda para inimigos fora da tela
 bool espShowOffscreenLabel = false;  // 🏷️ Texto do indicador 360 fora da tela
 bool espShowOffscreenCount = false;  // 🔢 Quantidade de inimigos na mesma direcao do ESP 360
@@ -1152,6 +1154,98 @@ static void DrawEspCircle(JNIEnv* env, jobject espView, jobject canvas, int a, i
     env->CallVoidMethod(espView, gEspDrawCircleMethod, canvas, a, r, g, b, stroke, x, y, radius);
 }
 
+static bool TryGetPlayerBoneScreen(void* player, uintptr_t boneOffset, Vector3& outScreen) {
+    outScreen = {0.0f, 0.0f, 0.0f};
+    if (!IsProbablyValidPtr(player)) return false;
+
+    try {
+        void* bone = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + boneOffset);
+        if (!IsProbablyValidPtr(bone)) return false;
+
+        Vector3 world = {0.0f, 0.0f, 0.0f};
+        if (!GetTransformWorldPosition(bone, world)) return false;
+        return WorldToScreen(world, outScreen);
+    } catch (...) {
+        return false;
+    }
+}
+
+static void DrawEspSkeleton(JNIEnv* env, jobject espView, jobject canvas,
+                            void* player, int red, int green, int blue, float stroke) {
+    if (!IsProbablyValidPtr(player)) return;
+
+    constexpr uintptr_t kBoneRoot = 0x24;
+    constexpr uintptr_t kBoneBody = 0x28;
+    constexpr uintptr_t kBoneUpHalfBody = 0x30;
+    constexpr uintptr_t kBoneNeck = 0x38;
+    constexpr uintptr_t kBoneHead = 0x3C;
+    constexpr uintptr_t kBoneRightUpperArm = 0x44;
+    constexpr uintptr_t kBoneRightHand = 0x48;
+    constexpr uintptr_t kBoneLeftUpperArm = 0x50;
+    constexpr uintptr_t kBoneLeftHand = 0x54;
+    constexpr uintptr_t kBoneLeftLeg = 0x58;
+    constexpr uintptr_t kBoneRightLeg = 0x5C;
+
+    Vector3 root = {0.0f, 0.0f, 0.0f};
+    Vector3 body = {0.0f, 0.0f, 0.0f};
+    Vector3 upHalfBody = {0.0f, 0.0f, 0.0f};
+    Vector3 neck = {0.0f, 0.0f, 0.0f};
+    Vector3 head = {0.0f, 0.0f, 0.0f};
+    Vector3 rUpperArm = {0.0f, 0.0f, 0.0f};
+    Vector3 rHand = {0.0f, 0.0f, 0.0f};
+    Vector3 lUpperArm = {0.0f, 0.0f, 0.0f};
+    Vector3 lHand = {0.0f, 0.0f, 0.0f};
+    Vector3 lLeg = {0.0f, 0.0f, 0.0f};
+    Vector3 rLeg = {0.0f, 0.0f, 0.0f};
+
+    const bool hasRoot = TryGetPlayerBoneScreen(player, kBoneRoot, root);
+    const bool hasBody = TryGetPlayerBoneScreen(player, kBoneBody, body);
+    const bool hasUpHalfBody = TryGetPlayerBoneScreen(player, kBoneUpHalfBody, upHalfBody);
+    const bool hasNeck = TryGetPlayerBoneScreen(player, kBoneNeck, neck);
+    const bool hasHead = TryGetPlayerBoneScreen(player, kBoneHead, head);
+    const bool hasRightUpperArm = TryGetPlayerBoneScreen(player, kBoneRightUpperArm, rUpperArm);
+    const bool hasRightHand = TryGetPlayerBoneScreen(player, kBoneRightHand, rHand);
+    const bool hasLeftUpperArm = TryGetPlayerBoneScreen(player, kBoneLeftUpperArm, lUpperArm);
+    const bool hasLeftHand = TryGetPlayerBoneScreen(player, kBoneLeftHand, lHand);
+    const bool hasLeftLeg = TryGetPlayerBoneScreen(player, kBoneLeftLeg, lLeg);
+    const bool hasRightLeg = TryGetPlayerBoneScreen(player, kBoneRightLeg, rLeg);
+
+    if (hasHead && hasNeck) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, head.x, head.y, neck.x, neck.y);
+    }
+    if (hasNeck && hasUpHalfBody) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, neck.x, neck.y, upHalfBody.x, upHalfBody.y);
+    } else if (hasHead && hasUpHalfBody) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, head.x, head.y, upHalfBody.x, upHalfBody.y);
+    }
+    if (hasUpHalfBody && hasBody) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, upHalfBody.x, upHalfBody.y, body.x, body.y);
+    }
+    if (hasBody && hasRoot) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, body.x, body.y, root.x, root.y);
+    } else if (hasUpHalfBody && hasRoot) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, upHalfBody.x, upHalfBody.y, root.x, root.y);
+    }
+    if (hasUpHalfBody && hasRightUpperArm) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, upHalfBody.x, upHalfBody.y, rUpperArm.x, rUpperArm.y);
+    }
+    if (hasRightUpperArm && hasRightHand) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, rUpperArm.x, rUpperArm.y, rHand.x, rHand.y);
+    }
+    if (hasUpHalfBody && hasLeftUpperArm) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, upHalfBody.x, upHalfBody.y, lUpperArm.x, lUpperArm.y);
+    }
+    if (hasLeftUpperArm && hasLeftHand) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, lUpperArm.x, lUpperArm.y, lHand.x, lHand.y);
+    }
+    if (hasRoot && hasLeftLeg) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, root.x, root.y, lLeg.x, lLeg.y);
+    }
+    if (hasRoot && hasRightLeg) {
+        DrawEspLine(env, espView, canvas, 210, red, green, blue, stroke, root.x, root.y, rLeg.x, rLeg.y);
+    }
+}
+
 static void ResolveEspTypeColor(int baseType, int animalType, int gunID, int& outRed, int& outGreen, int& outBlue) {
     outRed = espColorRed;
     outGreen = espColorGreen;
@@ -1400,7 +1494,12 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
                     box.top <= static_cast<float>(screenHeight);
 
             if (boxVisibleOnScreen) {
-                DrawEspRect(env, espView, canvas, 220, red, green, blue, espBoxThickness, box.left, box.top, boxWidth, boxHeight);
+                if (espShowBox) {
+                    DrawEspRect(env, espView, canvas, 220, red, green, blue, espBoxThickness, box.left, box.top, boxWidth, boxHeight);
+                }
+                if (espShowSkeleton) {
+                    DrawEspSkeleton(env, espView, canvas, player, red, green, blue, std::max(1.2f, espLineThickness));
+                }
                 drewOnScreenEsp = true;
             }
         }
@@ -2589,8 +2688,10 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("CollapseAdd_67_SeekBar_ESP Espessura Box_1_8"),
             OBFUSCATE("CollapseAdd_68_SeekBar_ESP Espessura Linha_1_8"),
             OBFUSCATE("CollapseAdd_69_SeekBar_ESP Tamanho Texto_8_32"),
+            OBFUSCATE("CollapseAdd_80_Toggle_ESP Box"),
             OBFUSCATE("CollapseAdd_70_Toggle_ESP Snapline"),
             OBFUSCATE("CollapseAdd_71_Toggle_ESP Label"),
+            OBFUSCATE("CollapseAdd_79_Toggle_ESP Skeleton"),
             OBFUSCATE("CollapseAdd_76_Toggle_ESP 360 Off-screen"),
             OBFUSCATE("CollapseAdd_77_Toggle_Label do ESP 360"),
             OBFUSCATE("CollapseAdd_78_Toggle_Contador do ESP 360"),
@@ -2993,6 +3094,11 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
                 __android_log_print(ANDROID_LOG_INFO, "MOD_ESP", "ESP text size ajustado para: %.1f", espTextSize);
             }
             break;
+        case 80: // ESP Box
+            espShowBox = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
+                                boolean ? "ESP box ativada" : "ESP box desativada");
+            break;
         case 70: // ESP Snapline
             espShowSnapline = boolean;
             __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
@@ -3002,6 +3108,11 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             espShowLabel = boolean;
             __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
                                 boolean ? "ESP label ativada" : "ESP label desativada");
+            break;
+        case 79: // ESP Skeleton
+            espShowSkeleton = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
+                                boolean ? "ESP skeleton ativada" : "ESP skeleton desativada");
             break;
         case 76: // ESP 360 Off-screen
             espShowOffscreen360 = boolean;
