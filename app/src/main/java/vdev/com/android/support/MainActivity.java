@@ -1,5 +1,6 @@
 package vdev.com.android.support;
 
+import android.app.AlertDialog;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
@@ -16,12 +17,22 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -34,6 +45,8 @@ public class MainActivity extends Activity {
     private static final String LIB_URL = "https://modmanager-chi.vercel.app/api/download/libwestgunfighterhooksvdevso";
     private static final String LIB_NAME = "lib.so";
     private static final String GAME_ACTIVITY = "com.cg.cowboy.MainActivity";
+    private static final String MOD_INFO_URL = "https://vinaomods.vercel.app/api/mods/by-package";
+    private static final String MOD_LOOKUP_PACKAGE = "com.cg.cowboy";
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
@@ -41,10 +54,21 @@ public class MainActivity extends Activity {
     private EditText emailInput;
     private EditText passwordInput;
     private TextView statusText;
+    private TextView libraryReadyPill;
+    private TextView inlineErrorText;
+    private LinearLayout statusCard;
     private Button loginButton;
+    private Button passwordToggleButton;
+    private Button infoButton;
     private CheckBox saveLoginCheck;
 
     private volatile boolean libraryReady = false;
+    private boolean passwordVisible = false;
+    private boolean loginInFlight = false;
+    private boolean modInfoDialogShown = false;
+    private JSONObject cachedModInfo = null;
+    private GradientDrawable emailBackground;
+    private GradientDrawable passwordBackground;
 
     private static native String SubmitNativeLogin(Context context, String email, String password);
 
@@ -56,6 +80,7 @@ public class MainActivity extends Activity {
         deleteFile(LIB_NAME);
         buildContentView();
         startLibraryLoad();
+        startModInfoLoad();
     }
 
     @Override
@@ -65,23 +90,60 @@ public class MainActivity extends Activity {
     }
 
     private void buildContentView() {
+        FrameLayout frame = new FrameLayout(this);
+        frame.setBackground(makeVerticalGradient("#0B0E12", "#131920"));
+
+        View warmGlow = new View(this);
+        warmGlow.setBackground(makeVerticalGradient("#59F0B35A", "#00F0B35A"));
+        FrameLayout.LayoutParams glowParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(240)
+        );
+        glowParams.gravity = Gravity.TOP;
+        frame.addView(warmGlow, glowParams);
+
+        View sideGlow = new View(this);
+        sideGlow.setBackground(makeVerticalGradient("#309FC5E8", "#009FC5E8"));
+        FrameLayout.LayoutParams sideGlowParams = new FrameLayout.LayoutParams(
+                dp(180),
+                dp(320)
+        );
+        sideGlowParams.gravity = Gravity.END | Gravity.TOP;
+        sideGlowParams.topMargin = dp(80);
+        frame.addView(sideGlow, sideGlowParams);
+
         ScrollView scrollView = new ScrollView(this);
         scrollView.setFillViewport(true);
-        scrollView.setBackgroundColor(Color.parseColor("#101316"));
+        scrollView.setBackgroundColor(Color.TRANSPARENT);
+        frame.addView(scrollView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+        ));
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER_HORIZONTAL);
-        root.setPadding(dp(24), dp(32), dp(24), dp(32));
+        root.setPadding(dp(22), dp(28), dp(22), dp(28));
         scrollView.addView(root, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT,
                 ScrollView.LayoutParams.WRAP_CONTENT
         ));
 
+        TextView eyebrow = new TextView(this);
+        eyebrow.setText("VinaoMods Access");
+        eyebrow.setTextColor(Color.parseColor("#F0B35A"));
+        eyebrow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        eyebrow.setTypeface(Typeface.DEFAULT_BOLD);
+        eyebrow.setLetterSpacing(0.08f);
+        eyebrow.setPadding(dp(4), dp(4), dp(4), dp(14));
+        root.addView(eyebrow);
+
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(20), dp(20), dp(20), dp(20));
-        card.setBackground(makeRounded("#1A1F24", "#D9A35F", 20, 2));
+        card.setPadding(dp(22), dp(22), dp(22), dp(22));
+        card.setBackground(makeRounded("#171C21", "#44F0B35A", 28, 1));
+        card.setAlpha(0f);
+        card.setTranslationY(dp(24));
         root.addView(card, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -89,86 +151,213 @@ public class MainActivity extends Activity {
 
         TextView badge = new TextView(this);
         badge.setText("WEST GUNFIGHTER");
-        badge.setTextColor(Color.parseColor("#D9A35F"));
+        badge.setTextColor(Color.parseColor("#F0B35A"));
         badge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         badge.setTypeface(Typeface.DEFAULT_BOLD);
+        badge.setBackground(makeRounded("#221811", "#59F0B35A", 14, 1));
+        badge.setPadding(dp(10), dp(6), dp(10), dp(6));
         card.addView(badge);
 
         TextView title = new TextView(this);
-        title.setText("Login do Mod");
+        title.setText("Entrar para liberar o mod");
         title.setTextColor(Color.WHITE);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(0, dp(10), 0, dp(6));
+        title.setPadding(0, dp(14), 0, dp(6));
         card.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("A biblioteca carrega primeiro. Depois disso, o login Java envia email e senha para o backend via C++.");
+        subtitle.setText("Seu acesso e validado no aparelho antes da abertura do jogo. Use sua conta VIP para continuar.");
         subtitle.setTextColor(Color.parseColor("#B8C0C7"));
         subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        subtitle.setLineSpacing(dp(2), 1.0f);
         subtitle.setPadding(0, 0, 0, dp(18));
         card.addView(subtitle);
 
+        libraryReadyPill = new TextView(this);
+        libraryReadyPill.setText("Biblioteca offline");
+        libraryReadyPill.setTextColor(Color.parseColor("#D7DDE2"));
+        libraryReadyPill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        libraryReadyPill.setTypeface(Typeface.DEFAULT_BOLD);
+        libraryReadyPill.setBackground(makeRounded("#201715", "#4A2F29", 14, 1));
+        libraryReadyPill.setPadding(dp(10), dp(7), dp(10), dp(7));
+        LinearLayout.LayoutParams pillParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        pillParams.bottomMargin = dp(18);
+        card.addView(libraryReadyPill, pillParams);
+
+        View divider = new View(this);
+        divider.setBackgroundColor(Color.parseColor("#2A333B"));
+        LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(1)
+        );
+        dividerParams.bottomMargin = dp(18);
+        card.addView(divider, dividerParams);
+
+        statusCard = new LinearLayout(this);
+        statusCard.setOrientation(LinearLayout.VERTICAL);
+        statusCard.setPadding(dp(14), dp(12), dp(14), dp(12));
+        statusCard.setBackground(makeRounded("#12202B", "#284254", 18, 1));
+        card.addView(statusCard, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView statusLabel = new TextView(this);
+        statusLabel.setText("Status");
+        statusLabel.setTextColor(Color.parseColor("#8AA6BC"));
+        statusLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        statusLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        statusLabel.setLetterSpacing(0.06f);
+        statusCard.addView(statusLabel);
+
         statusText = new TextView(this);
-        statusText.setText("Carregando biblioteca online...");
         statusText.setTextColor(Color.parseColor("#9FC5E8"));
         statusText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        statusText.setPadding(0, 0, 0, dp(18));
-        card.addView(statusText);
+        statusText.setLineSpacing(dp(2), 1.0f);
+        statusText.setPadding(0, dp(6), 0, 0);
+        statusCard.addView(statusText);
+        setStatus("Carregando biblioteca protegida...", "#9FC5E8", "#12202B", "#284254");
 
         boolean saveLoginEnabled = preferences.getBoolean(PREF_SAVE_LOGIN, true);
 
-        emailInput = createInput("Email", false);
+        addFieldLabel(card, "Email da conta");
+        emailInput = createInput("Digite seu email", false);
+        emailBackground = (GradientDrawable) emailInput.getBackground().mutate();
         if (saveLoginEnabled) {
             emailInput.setText(preferences.getString(PREF_EMAIL, ""));
         }
-        card.addView(emailInput);
-
-        passwordInput = createInput("Senha", true);
-        if (saveLoginEnabled) {
-            passwordInput.setText(preferences.getString(PREF_PASSWORD, ""));
-        }
-        LinearLayout.LayoutParams passwordParams = new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams emailParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        passwordParams.topMargin = dp(12);
-        card.addView(passwordInput, passwordParams);
+        emailParams.topMargin = dp(10);
+        card.addView(emailInput, emailParams);
+
+        addFieldLabel(card, "Senha");
+        passwordInput = createInput("Digite sua senha", true);
+        passwordBackground = (GradientDrawable) passwordInput.getBackground().mutate();
+        if (saveLoginEnabled) {
+            passwordInput.setText(preferences.getString(PREF_PASSWORD, ""));
+        }
+
+        LinearLayout passwordRow = new LinearLayout(this);
+        passwordRow.setOrientation(LinearLayout.HORIZONTAL);
+        passwordRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams passwordRowParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        passwordRowParams.topMargin = dp(10);
+        card.addView(passwordRow, passwordRowParams);
+
+        LinearLayout.LayoutParams passwordInputParams = new LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1.0f
+        );
+        passwordRow.addView(passwordInput, passwordInputParams);
+
+        passwordToggleButton = new Button(this);
+        passwordToggleButton.setText("Mostrar");
+        passwordToggleButton.setAllCaps(false);
+        passwordToggleButton.setTextColor(Color.parseColor("#E7BE7A"));
+        passwordToggleButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        passwordToggleButton.setTypeface(Typeface.DEFAULT_BOLD);
+        passwordToggleButton.setBackground(makeRounded("#18120C", "#6B4A24", 16, 1));
+        passwordToggleButton.setPadding(dp(14), dp(13), dp(14), dp(13));
+        passwordToggleButton.setOnClickListener(v -> togglePasswordVisibility());
+        LinearLayout.LayoutParams toggleParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        toggleParams.leftMargin = dp(10);
+        passwordRow.addView(passwordToggleButton, toggleParams);
+
+        inlineErrorText = new TextView(this);
+        inlineErrorText.setTextColor(Color.parseColor("#FF8A80"));
+        inlineErrorText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        inlineErrorText.setLineSpacing(dp(2), 1.0f);
+        inlineErrorText.setVisibility(View.GONE);
+        LinearLayout.LayoutParams inlineErrorParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        inlineErrorParams.topMargin = dp(10);
+        card.addView(inlineErrorText, inlineErrorParams);
 
         saveLoginCheck = new CheckBox(this);
         saveLoginCheck.setText("Salvar login neste aparelho");
         saveLoginCheck.setTextColor(Color.parseColor("#D7DDE2"));
-        saveLoginCheck.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.parseColor("#D9A35F")));
+        saveLoginCheck.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.parseColor("#F0B35A")));
         saveLoginCheck.setChecked(saveLoginEnabled);
-        saveLoginCheck.setPadding(0, dp(12), 0, 0);
+        saveLoginCheck.setPadding(0, dp(14), 0, 0);
         card.addView(saveLoginCheck);
 
         loginButton = new Button(this);
-        loginButton.setText("Entrar e abrir jogo");
+        loginButton.setText("Entrar");
         loginButton.setAllCaps(false);
         loginButton.setTextColor(Color.parseColor("#1A120D"));
         loginButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         loginButton.setTypeface(Typeface.DEFAULT_BOLD);
         loginButton.setEnabled(false);
-        loginButton.setBackground(makeRounded("#D9A35F", "#E8C18E", 24, 0));
-        loginButton.setPadding(dp(16), dp(14), dp(16), dp(14));
+        loginButton.setAlpha(0.55f);
+        loginButton.setBackground(makeVerticalGradient("#F0B35A", "#D99545"));
+        loginButton.setPadding(dp(16), dp(16), dp(16), dp(16));
         loginButton.setOnClickListener(v -> submitLogin());
 
         LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        buttonParams.topMargin = dp(18);
+        buttonParams.topMargin = dp(20);
         card.addView(loginButton, buttonParams);
 
-        TextView footer = new TextView(this);
-        footer.setText("Sem XML. Tela criada inteiramente em Java.");
-        footer.setTextColor(Color.parseColor("#6F7C88"));
-        footer.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        footer.setPadding(0, dp(16), 0, 0);
-        card.addView(footer);
+        infoButton = new Button(this);
+        infoButton.setText("Ver novidades");
+        infoButton.setAllCaps(false);
+        infoButton.setTextColor(Color.parseColor("#D7DDE2"));
+        infoButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        infoButton.setTypeface(Typeface.DEFAULT_BOLD);
+        infoButton.setBackground(makeRounded("#11161B", "#2F3943", 18, 1));
+        infoButton.setPadding(dp(14), dp(14), dp(14), dp(14));
+        infoButton.setEnabled(false);
+        infoButton.setAlpha(0.55f);
+        infoButton.setOnClickListener(v -> {
+            if (cachedModInfo != null) {
+                showModInfoDialog(cachedModInfo);
+                return;
+            }
+            startModInfoLoad();
+        });
 
-        setContentView(scrollView);
+        LinearLayout.LayoutParams infoButtonParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        infoButtonParams.topMargin = dp(10);
+        card.addView(infoButton, infoButtonParams);
+
+        TextView helper = new TextView(this);
+        helper.setText("Depois da validacao, o carregamento do overlay e encaminhado direto ao jogo.");
+        helper.setTextColor(Color.parseColor("#6F7C88"));
+        helper.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        helper.setLineSpacing(dp(2), 1.0f);
+        helper.setPadding(0, dp(14), 0, 0);
+        card.addView(helper);
+
+        bindInputFocus(emailInput, emailBackground);
+        bindInputFocus(passwordInput, passwordBackground);
+        card.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(320)
+                .start();
+
+        setContentView(frame);
     }
 
     private void startLibraryLoad() {
@@ -177,9 +366,11 @@ public class MainActivity extends Activity {
             public void onLibraryReady(File file) {
                 runOnUiThread(() -> {
                     libraryReady = true;
-                    statusText.setText("Biblioteca carregada. Faça login para continuar.");
-                    statusText.setTextColor(Color.parseColor("#7CFCB2"));
-                    loginButton.setEnabled(true);
+                    libraryReadyPill.setText("Biblioteca pronta");
+                    libraryReadyPill.setTextColor(Color.parseColor("#7CFCB2"));
+                    libraryReadyPill.setBackground(makeRounded("#10251B", "#225235", 14, 1));
+                    setStatus("Biblioteca carregada. Faça login para continuar.", "#7CFCB2", "#10251B", "#225235");
+                    setLoginButtonState(true, "Entrar");
                 });
             }
 
@@ -187,11 +378,58 @@ public class MainActivity extends Activity {
             public void onLibraryError(String message) {
                 runOnUiThread(() -> {
                     libraryReady = false;
-                    statusText.setText(message);
-                    statusText.setTextColor(Color.parseColor("#FF8A80"));
-                    loginButton.setEnabled(false);
+                    libraryReadyPill.setText("Falha ao carregar");
+                    libraryReadyPill.setTextColor(Color.parseColor("#FF8A80"));
+                    libraryReadyPill.setBackground(makeRounded("#2B1517", "#5C2B31", 14, 1));
+                    setStatus(message, "#FF8A80", "#2B1517", "#5C2B31");
+                    setLoginButtonState(false, "Entrar");
                     Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
                 });
+            }
+        });
+    }
+
+    private void startModInfoLoad() {
+        executor.execute(() -> {
+            try {
+                String requestUrl = MOD_INFO_URL + "?packageName=" + URLEncoder.encode(MOD_LOOKUP_PACKAGE, "UTF-8");
+                HttpURLConnection connection = (HttpURLConnection) new URL(requestUrl).openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(8000);
+                connection.setReadTimeout(8000);
+                connection.setRequestProperty("accept", "application/json");
+
+                int statusCode = connection.getResponseCode();
+                InputStream stream = statusCode >= 200 && statusCode < 300
+                        ? connection.getInputStream()
+                        : connection.getErrorStream();
+                String payload = readStream(stream);
+                if (statusCode < 200 || statusCode >= 300) {
+                    Log.w(TAG, "Falha ao buscar resumo do mod: " + statusCode + " " + payload);
+                    return;
+                }
+
+                JSONObject root = new JSONObject(payload);
+                if (!root.optBoolean("ok")) {
+                    return;
+                }
+
+                JSONObject mod = root.optJSONObject("mod");
+                if (mod == null) {
+                    return;
+                }
+
+                runOnUiThread(() -> {
+                    cachedModInfo = mod;
+                    infoButton.setEnabled(true);
+                    infoButton.setAlpha(1.0f);
+                    if (!modInfoDialogShown) {
+                        modInfoDialogShown = true;
+                        showModInfoDialog(mod);
+                    }
+                });
+            } catch (Exception exception) {
+                Log.w(TAG, "Falha ao carregar novidades do mod", exception);
             }
         });
     }
@@ -206,13 +444,15 @@ public class MainActivity extends Activity {
         }
 
         if (email.isEmpty() || password.isEmpty()) {
+            showInlineError("Preencha email e senha para continuar.");
             Toast.makeText(this, "Preencha email e senha.", Toast.LENGTH_LONG).show();
             return;
         }
 
-        statusText.setText("Validando credenciais no backend...");
-        statusText.setTextColor(Color.parseColor("#F4D37B"));
-        loginButton.setEnabled(false);
+        loginInFlight = true;
+        clearInlineError();
+        setStatus("Validando credenciais no backend...", "#F4D37B", "#2A2411", "#5E5130");
+        setLoginButtonState(false, "Validando...");
 
         executor.execute(() -> {
             String error = SubmitNativeLogin(MainActivity.this, email, password);
@@ -232,8 +472,7 @@ public class MainActivity extends Activity {
                                 .apply();
                     }
 
-                    statusText.setText("Login validado. Abrindo jogo...");
-                    statusText.setTextColor(Color.parseColor("#7CFCB2"));
+                    setStatus("Login validado. Abrindo jogo...", "#7CFCB2", "#10251B", "#225235");
 
                     Main.Start(MainActivity.this);
 
@@ -245,18 +484,192 @@ public class MainActivity extends Activity {
                         finish();
                     } catch (Exception exception) {
                         Log.e(TAG, "Falha ao abrir game activity", exception);
-                        statusText.setText("Login ok, mas falhou ao abrir o jogo.");
-                        statusText.setTextColor(Color.parseColor("#FF8A80"));
-                        loginButton.setEnabled(true);
+                        loginInFlight = false;
+                        showInlineError("O login foi aceito, mas a abertura do jogo falhou.");
+                        setStatus("Login ok, mas falhou ao abrir o jogo.", "#FF8A80", "#2B1517", "#5C2B31");
+                        setLoginButtonState(true, "Entrar");
                     }
                     return;
                 }
 
-                statusText.setText(error);
-                statusText.setTextColor(Color.parseColor("#FF8A80"));
-                loginButton.setEnabled(true);
+                loginInFlight = false;
+                showInlineError(error);
+                setStatus(error, "#FF8A80", "#2B1517", "#5C2B31");
+                setLoginButtonState(true, "Entrar");
             });
         });
+    }
+
+    private void addFieldLabel(LinearLayout parent, String text) {
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextColor(Color.parseColor("#D8DEE4"));
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        label.setTypeface(Typeface.DEFAULT_BOLD);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        params.topMargin = dp(16);
+        parent.addView(label, params);
+    }
+
+    private void togglePasswordVisibility() {
+        passwordVisible = !passwordVisible;
+        int selection = Math.max(passwordInput.getSelectionEnd(), 0);
+        passwordInput.setInputType(passwordVisible
+                ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        passwordInput.setSelection(selection);
+        passwordToggleButton.setText(passwordVisible ? "Ocultar" : "Mostrar");
+    }
+
+    private void setStatus(String text, String textColor, String fillColor, String strokeColor) {
+        statusCard.animate().alpha(0.78f).setDuration(90).withEndAction(() -> {
+            statusText.setText(text);
+            statusText.setTextColor(Color.parseColor(textColor));
+            statusCard.setBackground(makeRounded(fillColor, strokeColor, 18, 1));
+            statusCard.animate().alpha(1f).setDuration(140).start();
+        }).start();
+    }
+
+    private void setLoginButtonState(boolean enabled, String text) {
+        loginButton.setEnabled(enabled);
+        loginButton.setText(text);
+        loginButton.setAlpha(enabled ? 1.0f : 0.55f);
+    }
+
+    private void showModInfoDialog(JSONObject mod) {
+        try {
+            ScrollView scrollView = new ScrollView(this);
+            scrollView.setFillViewport(true);
+
+            LinearLayout content = new LinearLayout(this);
+            content.setOrientation(LinearLayout.VERTICAL);
+            content.setPadding(dp(20), dp(18), dp(20), dp(8));
+            content.setBackground(makeRounded("#171C21", "#44F0B35A", 24, 1));
+            scrollView.addView(content, new ScrollView.LayoutParams(
+                    ScrollView.LayoutParams.MATCH_PARENT,
+                    ScrollView.LayoutParams.WRAP_CONTENT
+            ));
+
+            TextView eyebrow = new TextView(this);
+            eyebrow.setText("Resumo do site");
+            eyebrow.setTextColor(Color.parseColor("#F0B35A"));
+            eyebrow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            eyebrow.setTypeface(Typeface.DEFAULT_BOLD);
+            eyebrow.setLetterSpacing(0.08f);
+            content.addView(eyebrow);
+
+            TextView title = new TextView(this);
+            title.setText(mod.optString("title", "Mod"));
+            title.setTextColor(Color.WHITE);
+            title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
+            title.setTypeface(Typeface.DEFAULT_BOLD);
+            title.setPadding(0, dp(10), 0, dp(8));
+            content.addView(title);
+
+            TextView summary = new TextView(this);
+            summary.setText(mod.optString("summary", "Sem resumo disponível."));
+            summary.setTextColor(Color.parseColor("#D6DDE3"));
+            summary.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            summary.setLineSpacing(dp(2), 1.0f);
+            content.addView(summary);
+
+            addDialogMeta(content, "Status", mod.optString("status", "Indefinido"));
+            addDialogMeta(content, "Acesso", mod.optString("availability", "Não informado"));
+            addDialogMeta(content, "Downloads", String.valueOf(mod.optInt("downloadCount", 0)));
+
+            JSONArray highlights = mod.optJSONArray("highlights");
+            if (highlights != null && highlights.length() > 0) {
+                TextView highlightsTitle = new TextView(this);
+                highlightsTitle.setText("Novidades");
+                highlightsTitle.setTextColor(Color.parseColor("#F0B35A"));
+                highlightsTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+                highlightsTitle.setTypeface(Typeface.DEFAULT_BOLD);
+                highlightsTitle.setPadding(0, dp(16), 0, dp(8));
+                content.addView(highlightsTitle);
+
+                for (int i = 0; i < highlights.length(); i++) {
+                    String item = highlights.optString(i, "").trim();
+                    if (item.isEmpty()) {
+                        continue;
+                    }
+                    TextView bullet = new TextView(this);
+                    bullet.setText("• " + item);
+                    bullet.setTextColor(Color.parseColor("#D6DDE3"));
+                    bullet.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+                    bullet.setLineSpacing(dp(2), 1.0f);
+                    bullet.setPadding(0, 0, 0, dp(6));
+                    content.addView(bullet);
+                }
+            }
+
+            AlertDialog dialog = new AlertDialog.Builder(this)
+                    .setView(scrollView)
+                    .setPositiveButton("Fechar", null)
+                    .create();
+            dialog.show();
+            if (dialog.getWindow() != null) {
+                dialog.getWindow().setBackgroundDrawable(makeRounded("#101419", "#44F0B35A", 28, 1));
+            }
+        } catch (Exception exception) {
+            Log.w(TAG, "Falha ao abrir dialog de resumo do mod", exception);
+        }
+    }
+
+    private void addDialogMeta(LinearLayout parent, String label, String value) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setBackground(makeRounded("#101419", "#2F3943", 16, 1));
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        params.topMargin = dp(10);
+        parent.addView(row, params);
+
+        TextView title = new TextView(this);
+        title.setText(label);
+        title.setTextColor(Color.parseColor("#8AA6BC"));
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        row.addView(title);
+
+        TextView body = new TextView(this);
+        body.setText(value);
+        body.setTextColor(Color.WHITE);
+        body.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        body.setPadding(0, dp(4), 0, 0);
+        row.addView(body);
+    }
+
+    private String readStream(InputStream stream) throws Exception {
+        if (stream == null) {
+            return "";
+        }
+
+        BufferedReader reader = new BufferedReader(new InputStreamReader(stream));
+        StringBuilder builder = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            builder.append(line);
+        }
+        reader.close();
+        return builder.toString();
+    }
+
+    private void showInlineError(String message) {
+        inlineErrorText.setText(message);
+        inlineErrorText.setVisibility(View.VISIBLE);
+        inlineErrorText.setAlpha(0f);
+        inlineErrorText.animate().alpha(1f).setDuration(160).start();
+    }
+
+    private void clearInlineError() {
+        inlineErrorText.setText("");
+        inlineErrorText.setVisibility(View.GONE);
     }
 
     private EditText createInput(String hint, boolean password) {
@@ -265,7 +678,7 @@ public class MainActivity extends Activity {
         input.setHintTextColor(Color.parseColor("#7D8892"));
         input.setTextColor(Color.WHITE);
         input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        input.setBackground(makeRounded("#11161B", "#2A333B", 16, 2));
+        input.setBackground(makeRounded("#101419", "#2F3943", 18, 1));
         input.setPadding(dp(14), dp(14), dp(14), dp(14));
         input.setSingleLine(true);
         input.setInputType(password
@@ -274,11 +687,33 @@ public class MainActivity extends Activity {
         return input;
     }
 
+    private void bindInputFocus(EditText input, GradientDrawable background) {
+        input.setOnFocusChangeListener((view, hasFocus) -> {
+            if (hasFocus) {
+                background.setStroke(dp(2), Color.parseColor("#F0B35A"));
+            } else {
+                background.setStroke(dp(1), Color.parseColor("#2F3943"));
+            }
+        });
+    }
+
     private GradientDrawable makeRounded(String fill, String stroke, int radiusDp, int strokeDp) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(Color.parseColor(fill));
         drawable.setCornerRadius(dp(radiusDp));
         drawable.setStroke(dp(strokeDp), Color.parseColor(stroke));
+        return drawable;
+    }
+
+    private GradientDrawable makeVerticalGradient(String top, String bottom) {
+        GradientDrawable drawable = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{
+                        Color.parseColor(top),
+                        Color.parseColor(bottom)
+                }
+        );
+        drawable.setCornerRadius(dp(28));
         return drawable;
     }
 

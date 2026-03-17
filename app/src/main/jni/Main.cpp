@@ -82,6 +82,7 @@ bool espShowSnapline = false;        // 📐 Linha da base da tela ate o alvo
 bool espShowLabel = false;           // 🏷️ Texto com tag/distancia
 bool espShowOffscreen360 = false;    // 🧭 Indicador de borda para inimigos fora da tela
 bool espShowOffscreenLabel = false;  // 🏷️ Texto do indicador 360 fora da tela
+bool espShowOffscreenCount = false;  // 🔢 Quantidade de inimigos na mesma direcao do ESP 360
 int sliderValue = 1, Moedas = 0, Gems = 0;
 int espSnaplineOriginMode = 0;       // 0 = topo, 1 = centro, 2 = base
 float flyVerticalSpeed = 5.0f;
@@ -1202,6 +1203,86 @@ static void DrawEspTriangle(JNIEnv* env, jobject espView, jobject canvas,
     DrawEspLine(env, espView, canvas, a, r, g, b, stroke, leftX, leftY, rightX, rightY);
 }
 
+struct OffscreenEspGroup {
+    bool active = false;
+    float dirX = 0.0f;
+    float dirY = 0.0f;
+    float nearestDistance = 99999.0f;
+    int count = 0;
+    int red = 255;
+    int green = 90;
+    int blue = 90;
+    const char* tag = "ENEMY";
+};
+
+static int FindMatchingOffscreenGroup(OffscreenEspGroup* groups, int groupCount, float dirX, float dirY) {
+    int bestIndex = -1;
+    float bestSimilarity = 0.94f;
+
+    for (int i = 0; i < groupCount; ++i) {
+        if (!groups[i].active) continue;
+
+        const float similarity = (groups[i].dirX * dirX) + (groups[i].dirY * dirY);
+        if (similarity > bestSimilarity) {
+            bestSimilarity = similarity;
+            bestIndex = i;
+        }
+    }
+
+    return bestIndex;
+}
+
+static void AddOrUpdateOffscreenGroup(OffscreenEspGroup* groups, int& groupCount, int maxGroups,
+                                      float dirX, float dirY, float distance,
+                                      int red, int green, int blue, const char* tag) {
+    if (!groups || maxGroups <= 0 || !tag) return;
+
+    int groupIndex = FindMatchingOffscreenGroup(groups, groupCount, dirX, dirY);
+    if (groupIndex < 0) {
+        if (groupCount >= maxGroups) {
+            int farthestIndex = 0;
+            for (int i = 1; i < groupCount; ++i) {
+                if (groups[i].nearestDistance > groups[farthestIndex].nearestDistance) {
+                    farthestIndex = i;
+                }
+            }
+            groupIndex = farthestIndex;
+        } else {
+            groupIndex = groupCount++;
+        }
+
+        groups[groupIndex].active = true;
+        groups[groupIndex].dirX = dirX;
+        groups[groupIndex].dirY = dirY;
+        groups[groupIndex].nearestDistance = distance;
+        groups[groupIndex].count = 1;
+        groups[groupIndex].red = red;
+        groups[groupIndex].green = green;
+        groups[groupIndex].blue = blue;
+        groups[groupIndex].tag = tag;
+        return;
+    }
+
+    OffscreenEspGroup& group = groups[groupIndex];
+    group.count += 1;
+
+    const float blendedDirX = (group.dirX * static_cast<float>(group.count - 1)) + dirX;
+    const float blendedDirY = (group.dirY * static_cast<float>(group.count - 1)) + dirY;
+    const float blendedLength = std::sqrt((blendedDirX * blendedDirX) + (blendedDirY * blendedDirY));
+    if (blendedLength > 0.001f) {
+        group.dirX = blendedDirX / blendedLength;
+        group.dirY = blendedDirY / blendedLength;
+    }
+
+    if (distance < group.nearestDistance) {
+        group.nearestDistance = distance;
+        group.red = red;
+        group.green = green;
+        group.blue = blue;
+        group.tag = tag;
+    }
+}
+
 static bool ProjectWorldToScreenRaw(const Vector3& worldPos, Vector3& outScreenPos) {
     outScreenPos = {0.0f, 0.0f, 0.0f};
 
@@ -1249,6 +1330,8 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
     const float screenCenterY = static_cast<float>(screenHeight) * 0.5f;
     const float edgeMargin = 42.0f;
     const float offscreenRadius = 14.0f;
+    OffscreenEspGroup offscreenGroups[16] = {};
+    int offscreenGroupCount = 0;
 
     Vector3 myPos = {0.0f, 0.0f, 0.0f};
     if (!GetPlayerWorldPosition(myPlayer, myPos)) return;
@@ -1357,27 +1440,47 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
 
             const float usableHalfWidth = screenCenterX - edgeMargin;
             const float usableHalfHeight = screenCenterY - edgeMargin;
-            const float scaleX = usableHalfWidth / std::max(std::fabs(dirX), 0.001f);
-            const float scaleY = usableHalfHeight / std::max(std::fabs(dirY), 0.001f);
-            const float edgeScale = std::min(scaleX, scaleY);
+            if (usableHalfWidth <= 0.0f || usableHalfHeight <= 0.0f) continue;
 
-            const float indicatorX = screenCenterX + (dirX * edgeScale);
-            const float indicatorY = screenCenterY + (dirY * edgeScale);
-            const float dangerFactor = std::max(0.0f, std::min(1.0f, (40.0f - distance) / 40.0f));
-            const float triangleLength = 14.0f + (dangerFactor * 8.0f);
-            const float triangleWidth = 8.0f + (dangerFactor * 3.0f);
-            const float ringRadius = offscreenRadius + (dangerFactor * 4.0f);
-            const int indicatorAlpha = 190 + static_cast<int>(dangerFactor * 50.0f);
+            AddOrUpdateOffscreenGroup(offscreenGroups, offscreenGroupCount,
+                                      static_cast<int>(sizeof(offscreenGroups) / sizeof(offscreenGroups[0])),
+                                      dirX, dirY, distance, red, green, blue, tag);
+        }
+    }
 
-            DrawEspTriangle(env, espView, canvas, indicatorAlpha, red, green, blue,
-                            std::max(2.0f, espLineThickness), indicatorX, indicatorY,
-                            dirX, dirY, triangleLength, triangleWidth);
-            DrawEspCircle(env, espView, canvas, 160, red, green, blue,
-                          std::max(1.5f, espLineThickness - 0.2f), indicatorX, indicatorY, ringRadius);
+    for (int groupIndex = 0; groupIndex < offscreenGroupCount; ++groupIndex) {
+        OffscreenEspGroup& group = offscreenGroups[groupIndex];
+        if (!group.active) continue;
 
-            if (espShowOffscreenLabel) {
-                DrawEspText(env, espView, canvas, 235, 255, 255, 255, label, indicatorX, indicatorY - 24.0f, std::max(10.0f, espTextSize - 2.0f));
-            }
+        const float scaleX = (screenCenterX - edgeMargin) / std::max(std::fabs(group.dirX), 0.001f);
+        const float scaleY = (screenCenterY - edgeMargin) / std::max(std::fabs(group.dirY), 0.001f);
+        const float edgeScale = std::min(scaleX, scaleY);
+        const float indicatorX = screenCenterX + (group.dirX * edgeScale);
+        const float indicatorY = screenCenterY + (group.dirY * edgeScale);
+        const float dangerFactor = std::max(0.0f, std::min(1.0f, (40.0f - group.nearestDistance) / 40.0f));
+        const float triangleLength = 15.0f + (dangerFactor * 10.0f);
+        const float triangleWidth = 9.0f + (dangerFactor * 4.0f);
+        const float ringRadius = offscreenRadius + (dangerFactor * 5.0f);
+        const int indicatorAlpha = 195 + static_cast<int>(dangerFactor * 50.0f);
+
+        DrawEspTriangle(env, espView, canvas, indicatorAlpha, group.red, group.green, group.blue,
+                        std::max(2.0f, espLineThickness), indicatorX, indicatorY,
+                        group.dirX, group.dirY, triangleLength, triangleWidth);
+        DrawEspCircle(env, espView, canvas, 165, group.red, group.green, group.blue,
+                      std::max(1.5f, espLineThickness - 0.2f), indicatorX, indicatorY, ringRadius);
+
+        if (espShowOffscreenCount && group.count > 1) {
+            char countText[16] = {0};
+            std::snprintf(countText, sizeof(countText), "x%d", group.count);
+            DrawEspText(env, espView, canvas, 245, group.red, group.green, group.blue, countText,
+                        indicatorX, indicatorY + ringRadius + 16.0f, std::max(11.0f, espTextSize - 3.0f));
+        }
+
+        if (espShowOffscreenLabel) {
+            char groupLabel[64] = {0};
+            std::snprintf(groupLabel, sizeof(groupLabel), "%s %.0fm", group.tag, group.nearestDistance);
+            DrawEspText(env, espView, canvas, 235, 255, 255, 255, groupLabel,
+                        indicatorX, indicatorY - 24.0f, std::max(10.0f, espTextSize - 2.0f));
         }
     }
 
@@ -2451,7 +2554,7 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
 
     const char *features[] = {
             OBFUSCATE("Category_Menu de Modificações"),
-            OBFUSCATE("Collapse_Player e Recursos_True"),
+            OBFUSCATE("Collapse_Player e Recursos"),
             OBFUSCATE("CollapseAdd_Category_Player e Recursos"),
             OBFUSCATE("CollapseAdd_4_Toggle_Vida Infinita (15/02/2026)"),
             OBFUSCATE("CollapseAdd_1_SeekBar_Dano de bala (15/02/2026)_1_999"),
@@ -2459,20 +2562,20 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("CollapseAdd_3_InputValue_Adicionar Gems (15/02/2026)"),
             OBFUSCATE("CollapseAdd_5_SeekBar_Balas das Armas (15/02/2026)_1_999999"),
 
-            OBFUSCATE("Collapse_Itens_True"),
+            OBFUSCATE("Collapse_Itens"),
             OBFUSCATE("CollapseAdd_Category_Itens"),
             OBFUSCATE("CollapseAdd_12_Button_Adicionar Todas as Partes de Armas (15/02/2026)"),
             OBFUSCATE("CollapseAdd_13_Button_Adicionar Todas as Peles (15/02/2026)"),
             OBFUSCATE("CollapseAdd_14_Button_Adicionar 10 Whisky (15/02/2026)"),
 
-            OBFUSCATE("Collapse_Combate_True"),
+            OBFUSCATE("Collapse_Combate"),
             OBFUSCATE("CollapseAdd_Category_Combate"),
             OBFUSCATE("CollapseAdd_35_Toggle_AimBot Agressivo (15/02/2026)"),
             OBFUSCATE("CollapseAdd_22_Toggle_Sempre Headshot (15/02/2026)"),
             OBFUSCATE("CollapseAdd_43_Toggle_Auto Kill Seguro (08/03/2026)"),
             OBFUSCATE("CollapseAdd_44_Button_Kill All Agora (08/03/2026)"),
 
-            OBFUSCATE("Collapse_ESP Canvas_True"),
+            OBFUSCATE("Collapse_ESP Canvas"),
             OBFUSCATE("CollapseAdd_Category_ESP Canvas"),
             OBFUSCATE("CollapseAdd_75_Toggle_ESP Canvas (Overlay Java)"),
             OBFUSCATE("CollapseAdd_64_SeekBar_ESP Vermelho_0_255"),
@@ -2485,17 +2588,18 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("CollapseAdd_71_Toggle_ESP Label"),
             OBFUSCATE("CollapseAdd_76_Toggle_ESP 360 Off-screen"),
             OBFUSCATE("CollapseAdd_77_Toggle_Label do ESP 360"),
+            OBFUSCATE("CollapseAdd_78_Toggle_Contador do ESP 360"),
             OBFUSCATE("CollapseAdd_72_Spinner_ESP Origem Linha_Topo,Centro,Base"),
             OBFUSCATE("CollapseAdd_73_SeekBar_ESP Offset X (Centro=200)_0_400"),
             OBFUSCATE("CollapseAdd_74_SeekBar_ESP Offset Y_0_400"),
 
-            OBFUSCATE("Collapse_ESP Nativa_True"),
+            OBFUSCATE("Collapse_ESP Nativa"),
             OBFUSCATE("CollapseAdd_Category_ESP Nativa"),
             OBFUSCATE("CollapseAdd_40_Toggle_ESP Completo (Barras de Vida) (08/03/2026)"),
             OBFUSCATE("CollapseAdd_41_Button_Atualizar ESP Agora (08/03/2026)"),
             OBFUSCATE("CollapseAdd_47_Toggle_ESP Inimigos no Minimapa (08/03/2026)"),
 
-            OBFUSCATE("Collapse_Visual e UI_True"),
+            OBFUSCATE("Collapse_Visual e UI"),
             OBFUSCATE("CollapseAdd_Category_Visual e UI"),
             OBFUSCATE("CollapseAdd_36_Button_Criar Mission Hints Visuais (08/03/2026)"),
             OBFUSCATE("CollapseAdd_37_Button_Remover Mission Hints Visuais (08/03/2026)"),
@@ -2506,7 +2610,7 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("CollapseAdd_48_Button_Mostrar Texto de Teste (08/03/2026)"),
             OBFUSCATE("CollapseAdd_49_InputText_Mostrar Texto Custom (08/03/2026)"),
 
-            OBFUSCATE("Collapse_Movimento_True"),
+            OBFUSCATE("Collapse_Movimento"),
             OBFUSCATE("CollapseAdd_Category_Movimento"),
             OBFUSCATE("CollapseAdd_32_Toggle_Modo Voo (Experimental) (15/02/2026)"),
             OBFUSCATE("CollapseAdd_33_SeekBar_Velocidade Vertical_1_20"),
@@ -2514,19 +2618,19 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("CollapseAdd_50_Toggle_NPCs Hostis Voadores (08/03/2026)"),
             OBFUSCATE("CollapseAdd_51_SeekBar_Intensidade do Voo NPC_1_30"),
 
-            OBFUSCATE("Collapse_Policia_True"),
+            OBFUSCATE("Collapse_Policia"),
             OBFUSCATE("CollapseAdd_Category_Policia"),
             OBFUSCATE("CollapseAdd_58_Button_Matar Somente Policiais (08/03/2026)"),
             OBFUSCATE("CollapseAdd_59_Toggle_Auto Limpar Policiais (08/03/2026)"),
 
-            OBFUSCATE("Collapse_Teleport_True"),
+            OBFUSCATE("Collapse_Teleport"),
             OBFUSCATE("CollapseAdd_Category_Teleport"),
             OBFUSCATE("CollapseAdd_60_Button_Teleportar Para Alvo Atual (10/03/2026)"),
             OBFUSCATE("CollapseAdd_61_Button_Teleportar Para Hostil Mais Proximo (10/03/2026)"),
             OBFUSCATE("CollapseAdd_62_Button_Teleportar Para NPC de Missao (10/03/2026)"),
             OBFUSCATE("CollapseAdd_63_Button_Teleportar Para NPC do Mapa (10/03/2026)"),
 
-            OBFUSCATE("Collapse_Chaos_True"),
+            OBFUSCATE("Collapse_Chaos"),
             OBFUSCATE("CollapseAdd_Category_Chaos"),
             OBFUSCATE("CollapseAdd_52_Button_Chaos Time (08/03/2026)"),
             OBFUSCATE("CollapseAdd_53_Button_Chaos Spawn (08/03/2026)"),
@@ -2903,6 +3007,11 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             espShowOffscreenLabel = boolean;
             __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
                                 boolean ? "Label do ESP 360 ativada" : "Label do ESP 360 desativada");
+            break;
+        case 78: // Contador do ESP 360
+            espShowOffscreenCount = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_ESP",
+                                boolean ? "Contador do ESP 360 ativado" : "Contador do ESP 360 desativado");
             break;
         case 72: // ESP Origem Linha
             if (value >= 0 && value <= 2) {
