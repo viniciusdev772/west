@@ -497,6 +497,7 @@ void ClearMiniMapEnemyEsp();
 void ShowWordsHintText(const char* text, float showTime);
 void QueueLoginSuccessHints(const char* displayName, int remainingDays);
 extern "C" jstring SubmitNativeLogin(JNIEnv* env, jclass clazz, jobject context, jstring email, jstring password);
+extern "C" jstring GetNativeLoginSummary(JNIEnv* env, jclass clazz);
 
 static long long GetMonotonicTimeMs() {
     timespec ts{};
@@ -3251,11 +3252,24 @@ jstring SubmitNativeLogin(JNIEnv* env, jclass, jobject context, jstring email, j
     return env->NewStringUTF(result);
 }
 
+extern "C"
+jstring GetNativeLoginSummary(JNIEnv* env, jclass) {
+    if (!env) {
+        return nullptr;
+    }
+
+    const char* summary = GetJavaLoginSuccessSummary();
+    return env->NewStringUTF((summary && summary[0]) ? summary : "{}");
+}
+
 int RegisterMainActivity(JNIEnv *env) {
     JNINativeMethod methods[] = {
             {OBFUSCATE("SubmitNativeLogin"),
              OBFUSCATE("(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
              reinterpret_cast<void *>(SubmitNativeLogin)},
+            {OBFUSCATE("GetNativeLoginSummary"),
+             OBFUSCATE("()Ljava/lang/String;"),
+             reinterpret_cast<void *>(GetNativeLoginSummary)},
     };
 
     jclass clazz = env->FindClass(OBFUSCATE("vdev/com/android/support/MainActivity"));

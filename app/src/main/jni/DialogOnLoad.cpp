@@ -57,6 +57,10 @@ constexpr jint kHttpReadTimeoutMs = 12000;
 char g_modSessionToken[256] = {0};
 char g_modDeviceFingerprint[128] = {0};
 char g_javaLoginError[kDialogTextCapacity] = {0};
+char g_loginDisplayName[128] = {0};
+char g_loginPolicyExpiresAt[64] = {0};
+char g_loginSuccessSummary[512] = {0};
+int g_loginRemainingDays = -1;
 
 void ClearLoginRefs(JNIEnv* env);
 void ClearDialogRef(JNIEnv* env);
@@ -863,6 +867,7 @@ bool PerformBackendLogin(JNIEnv* env, jobject context, const std::string& email,
     const std::string deviceFingerprint = ExtractJsonString(loginResponse, "deviceFingerprint");
     const std::string displayName = ExtractJsonStringAfterAnchor(loginResponse, "\"user\":{", "name");
     const std::string policyExpiresAt = ExtractJsonStringAfterAnchor(loginResponse, "\"policy\":{", "expiresAt");
+    const int remainingDays = CalculateRemainingDaysFromIsoUtc(policyExpiresAt);
     if (token.empty() || deviceFingerprint.empty()) {
         if (failureReason) *failureReason = "Sessao do mod nao foi emitida corretamente.";
         return false;
@@ -872,7 +877,21 @@ bool PerformBackendLogin(JNIEnv* env, jobject context, const std::string& email,
     g_modSessionToken[sizeof(g_modSessionToken) - 1] = '\0';
     std::strncpy(g_modDeviceFingerprint, deviceFingerprint.c_str(), sizeof(g_modDeviceFingerprint) - 1);
     g_modDeviceFingerprint[sizeof(g_modDeviceFingerprint) - 1] = '\0';
-    QueueLoginSuccessHints(displayName.c_str(), CalculateRemainingDaysFromIsoUtc(policyExpiresAt));
+    std::strncpy(g_loginDisplayName, displayName.c_str(), sizeof(g_loginDisplayName) - 1);
+    g_loginDisplayName[sizeof(g_loginDisplayName) - 1] = '\0';
+    std::strncpy(g_loginPolicyExpiresAt, policyExpiresAt.c_str(), sizeof(g_loginPolicyExpiresAt) - 1);
+    g_loginPolicyExpiresAt[sizeof(g_loginPolicyExpiresAt) - 1] = '\0';
+    g_loginRemainingDays = remainingDays;
+    std::snprintf(
+            g_loginSuccessSummary,
+            sizeof(g_loginSuccessSummary),
+            "{\"displayName\":\"%s\",\"remainingDays\":%d,\"expiresAt\":\"%s\",\"deviceFingerprint\":\"%s\"}",
+            JsonEscape(displayName).c_str(),
+            remainingDays,
+            JsonEscape(policyExpiresAt).c_str(),
+            JsonEscape(deviceFingerprint).c_str()
+    );
+    QueueLoginSuccessHints(displayName.c_str(), remainingDays);
     return true;
 }
 
@@ -1120,6 +1139,10 @@ void RecoverLoginState(JNIEnv* env, const char* reason) {
     g_warningPending = false;
     g_modSessionToken[0] = '\0';
     g_modDeviceFingerprint[0] = '\0';
+    g_loginDisplayName[0] = '\0';
+    g_loginPolicyExpiresAt[0] = '\0';
+    g_loginSuccessSummary[0] = '\0';
+    g_loginRemainingDays = -1;
     ClearWarningRefs(env);
     CopyDialogText(g_toastMessage, sizeof(g_toastMessage),
                    reason && reason[0] ? reason : "Falha na autenticacao. Tente novamente.",
@@ -1731,6 +1754,10 @@ void QueueLibLoadDialog(const char* title, const char* message) {
     g_toastPending = false;
     g_modSessionToken[0] = '\0';
     g_modDeviceFingerprint[0] = '\0';
+    g_loginDisplayName[0] = '\0';
+    g_loginPolicyExpiresAt[0] = '\0';
+    g_loginSuccessSummary[0] = '\0';
+    g_loginRemainingDays = -1;
 }
 
 void ShowQueuedLibLoadDialog(JNIEnv* env, jobject context) {
@@ -1789,4 +1816,8 @@ const char* SubmitJavaLogin(JNIEnv* env, jobject context, const char* email, con
                    "Falha na autenticacao do mod.");
     __android_log_print(ANDROID_LOG_WARN, "MOD_DIALOG", "Login Java rejeitado: %s", g_javaLoginError);
     return g_javaLoginError;
+}
+
+const char* GetJavaLoginSuccessSummary() {
+    return g_loginSuccessSummary[0] ? g_loginSuccessSummary : "{}";
 }

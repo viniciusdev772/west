@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -30,9 +31,11 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.FileInputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.security.MessageDigest;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -46,6 +49,7 @@ public class MainActivity extends Activity {
     private static final String LIB_NAME = "lib.so";
     private static final String GAME_ACTIVITY = "com.cg.cowboy.MainActivity";
     private static final String MOD_INFO_URL = "https://vinaomods.vercel.app/api/mods/by-package";
+    private static final String MOD_DETAILS_BASE_URL = "https://vinaomods.online/details?slug=";
     private static final String MOD_LOOKUP_PACKAGE = "com.cg.cowboy";
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -60,17 +64,20 @@ public class MainActivity extends Activity {
     private Button loginButton;
     private Button passwordToggleButton;
     private Button infoButton;
+    private Button detailsButton;
     private CheckBox saveLoginCheck;
 
     private volatile boolean libraryReady = false;
     private boolean passwordVisible = false;
     private boolean loginInFlight = false;
     private boolean modInfoDialogShown = false;
+    private boolean apkUpdateDialogShown = false;
     private JSONObject cachedModInfo = null;
     private GradientDrawable emailBackground;
     private GradientDrawable passwordBackground;
 
     private static native String SubmitNativeLogin(Context context, String email, String password);
+    private static native String GetNativeLoginSummary();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -341,6 +348,25 @@ public class MainActivity extends Activity {
         infoButtonParams.topMargin = dp(10);
         card.addView(infoButton, infoButtonParams);
 
+        detailsButton = new Button(this);
+        detailsButton.setText("Abrir página do mod");
+        detailsButton.setAllCaps(false);
+        detailsButton.setTextColor(Color.parseColor("#D7DDE2"));
+        detailsButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        detailsButton.setTypeface(Typeface.DEFAULT_BOLD);
+        detailsButton.setBackground(makeRounded("#11161B", "#2F3943", 18, 1));
+        detailsButton.setPadding(dp(14), dp(14), dp(14), dp(14));
+        detailsButton.setEnabled(false);
+        detailsButton.setAlpha(0.55f);
+        detailsButton.setOnClickListener(v -> openModDetailsPage());
+
+        LinearLayout.LayoutParams detailsButtonParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        detailsButtonParams.topMargin = dp(10);
+        card.addView(detailsButton, detailsButtonParams);
+
         TextView helper = new TextView(this);
         helper.setText("Depois da validacao, o carregamento do overlay e encaminhado direto ao jogo.");
         helper.setTextColor(Color.parseColor("#6F7C88"));
@@ -423,6 +449,9 @@ public class MainActivity extends Activity {
                     cachedModInfo = mod;
                     infoButton.setEnabled(true);
                     infoButton.setAlpha(1.0f);
+                    detailsButton.setEnabled(true);
+                    detailsButton.setAlpha(1.0f);
+                    maybeShowApkUpdateDialog(mod);
                     if (!modInfoDialogShown) {
                         modInfoDialogShown = true;
                         showModInfoDialog(mod);
@@ -473,22 +502,8 @@ public class MainActivity extends Activity {
                     }
 
                     setStatus("Login validado. Abrindo jogo...", "#7CFCB2", "#10251B", "#225235");
-
-                    Main.Start(MainActivity.this);
-
-                    try {
-                        Intent intent = new Intent();
-                        intent.setClassName(MainActivity.this, GAME_ACTIVITY);
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        startActivity(intent);
-                        finish();
-                    } catch (Exception exception) {
-                        Log.e(TAG, "Falha ao abrir game activity", exception);
-                        loginInFlight = false;
-                        showInlineError("O login foi aceito, mas a abertura do jogo falhou.");
-                        setStatus("Login ok, mas falhou ao abrir o jogo.", "#FF8A80", "#2B1517", "#5C2B31");
-                        setLoginButtonState(true, "Entrar");
-                    }
+                    loginInFlight = false;
+                    showLoginSuccessDialog();
                     return;
                 }
 
@@ -618,6 +633,135 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void maybeShowApkUpdateDialog(JSONObject mod) {
+        if (apkUpdateDialogShown || mod == null) {
+            return;
+        }
+
+        try {
+            String publishedApkSha256 = mod.optString("apkSha256", "").trim();
+            if (publishedApkSha256.isEmpty()) {
+                return;
+            }
+
+            String installedApkSha256 = calculateInstalledApkSha256();
+            if (installedApkSha256.isEmpty()) {
+                return;
+            }
+
+            if (publishedApkSha256.equalsIgnoreCase(installedApkSha256)) {
+                return;
+            }
+
+            apkUpdateDialogShown = true;
+
+            String title = mod.optString("title", "Mod");
+            String summary = mod.optString("summary", "Uma nova compilação do APK foi publicada.");
+            String updatedAt = mod.optString("updatedAt", "").trim();
+            String message = "Detectamos um APK mais recente para " + title + ".\n\n"
+                    + summary
+                    + (updatedAt.isEmpty() ? "" : "\n\nPublicação mais recente: " + updatedAt)
+                    + "\n\nAtualize o APK para manter o conteúdo em sincronia.";
+
+            new AlertDialog.Builder(this)
+                    .setTitle("Atualização disponível")
+                    .setMessage(message)
+                    .setPositiveButton("Entendi", null)
+                    .show();
+        } catch (Exception exception) {
+            Log.w(TAG, "Falha ao comparar SHA-256 do APK", exception);
+        }
+    }
+
+    private void openModDetailsPage() {
+        if (cachedModInfo == null) {
+            Toast.makeText(this, "Os dados do mod ainda nao foram carregados.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String slug = cachedModInfo.optString("slug", "").trim();
+        if (slug.isEmpty()) {
+            Toast.makeText(this, "Slug do mod indisponivel.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(MOD_DETAILS_BASE_URL + Uri.encode(slug)));
+            startActivity(intent);
+        } catch (Exception exception) {
+            Log.w(TAG, "Falha ao abrir pagina do mod", exception);
+            Toast.makeText(this, "Nao foi possivel abrir a pagina do mod.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void showLoginSuccessDialog() {
+        try {
+            JSONObject summary = new JSONObject(GetNativeLoginSummary());
+            String displayName = summary.optString("displayName", "Assinante");
+            int remainingDays = summary.optInt("remainingDays", -1);
+            String expiresAt = summary.optString("expiresAt", "").trim();
+            String deviceFingerprint = summary.optString("deviceFingerprint", "").trim();
+            String fingerprintShort = deviceFingerprint.length() > 12
+                    ? deviceFingerprint.substring(0, 12) + "..."
+                    : (deviceFingerprint.isEmpty() ? "Não informado" : deviceFingerprint);
+
+            LinearLayout content = new LinearLayout(this);
+            content.setOrientation(LinearLayout.VERTICAL);
+            content.setPadding(dp(20), dp(18), dp(20), dp(8));
+            content.setBackground(makeRounded("#171C21", "#44F0B35A", 24, 1));
+
+            TextView eyebrow = new TextView(this);
+            eyebrow.setText("Acesso liberado");
+            eyebrow.setTextColor(Color.parseColor("#F0B35A"));
+            eyebrow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            eyebrow.setTypeface(Typeface.DEFAULT_BOLD);
+            eyebrow.setLetterSpacing(0.08f);
+            content.addView(eyebrow);
+
+            TextView title = new TextView(this);
+            title.setText(displayName);
+            title.setTextColor(Color.WHITE);
+            title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
+            title.setTypeface(Typeface.DEFAULT_BOLD);
+            title.setPadding(0, dp(10), 0, dp(8));
+            content.addView(title);
+
+            addDialogMeta(content, "Expiração", remainingDays >= 0 ? remainingDays + " dias" : "Não informada");
+            addDialogMeta(content, "Validade", expiresAt.isEmpty() ? "Não informada" : expiresAt);
+            addDialogMeta(content, "Dispositivo", fingerprintShort);
+
+            AlertDialog dialog = new AlertDialog.Builder(this)
+                    .setView(content)
+                    .setPositiveButton("Abrir jogo", (dialogInterface, which) -> openGameAfterLogin())
+                    .setCancelable(false)
+                    .create();
+            dialog.show();
+            if (dialog.getWindow() != null) {
+                dialog.getWindow().setBackgroundDrawable(makeRounded("#101419", "#44F0B35A", 28, 1));
+            }
+        } catch (Exception exception) {
+            Log.w(TAG, "Falha ao montar dialog de sucesso do login", exception);
+            openGameAfterLogin();
+        }
+    }
+
+    private void openGameAfterLogin() {
+        Main.Start(MainActivity.this);
+
+        try {
+            Intent intent = new Intent();
+            intent.setClassName(MainActivity.this, GAME_ACTIVITY);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+            finish();
+        } catch (Exception exception) {
+            Log.e(TAG, "Falha ao abrir game activity", exception);
+            showInlineError("O login foi aceito, mas a abertura do jogo falhou.");
+            setStatus("Login ok, mas falhou ao abrir o jogo.", "#FF8A80", "#2B1517", "#5C2B31");
+            setLoginButtonState(true, "Entrar");
+        }
+    }
+
     private void addDialogMeta(LinearLayout parent, String label, String value) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.VERTICAL);
@@ -658,6 +802,37 @@ public class MainActivity extends Activity {
         }
         reader.close();
         return builder.toString();
+    }
+
+    private String calculateInstalledApkSha256() {
+        try {
+            String apkPath = getPackageCodePath();
+            if (apkPath == null || apkPath.isEmpty()) {
+                return "";
+            }
+
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            FileInputStream input = new FileInputStream(apkPath);
+            try {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    digest.update(buffer, 0, read);
+                }
+            } finally {
+                input.close();
+            }
+
+            byte[] hash = digest.digest();
+            StringBuilder builder = new StringBuilder(hash.length * 2);
+            for (byte value : hash) {
+                builder.append(String.format("%02X", value));
+            }
+            return builder.toString();
+        } catch (Exception exception) {
+            Log.w(TAG, "Falha ao calcular SHA-256 do APK instalado", exception);
+            return "";
+        }
     }
 
     private void showInlineError(String message) {
