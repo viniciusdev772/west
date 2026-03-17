@@ -717,10 +717,14 @@ std::string BuildSuspiciousPropsJson() {
 
 std::string MapBackendLoginError(const std::string& errorCode) {
     if (errorCode == "invalid_credentials") return "Usuario ou senha invalidos.";
+    if (errorCode == "unauthorized") return "Usuario ou senha invalidos.";
+    if (errorCode == "device_verification_required") return "Servidor indisponivel no momento. Tente novamente.";
     if (errorCode == "account_blocked") return "Conta bloqueada. Fale com o suporte.";
     if (errorCode == "license_inactive") return "Sua licenca nao esta ativa.";
     if (errorCode == "device_limit_reached") return "Limite de dispositivos atingido.";
     if (errorCode == "integrity_policy_denied") return "Ambiente inseguro detectado. Feche depuradores e tente novamente.";
+    if (errorCode == "rate_limited") return "Muitas tentativas. Aguarde um pouco e tente novamente.";
+    if (errorCode == "server_error") return "Servidor indisponivel no momento. Tente novamente.";
     if (errorCode == "challenge_not_found" || errorCode == "challenge_already_used" ||
         errorCode == "challenge_nonce_mismatch" || errorCode == "challenge_expired" ||
         errorCode == "challenge_ip_mismatch") {
@@ -839,7 +843,19 @@ bool PerformBackendLogin(JNIEnv* env, jobject context, const std::string& email,
 
     if (loginStatus < 200 || loginStatus >= 300) {
         const std::string errorCode = ExtractJsonString(loginResponse, "error");
-        if (failureReason) *failureReason = MapBackendLoginError(errorCode);
+        if (failureReason) {
+            if (!errorCode.empty()) {
+                *failureReason = MapBackendLoginError(errorCode);
+            } else if (loginStatus == 401) {
+                *failureReason = "Usuario ou senha invalidos.";
+            } else if (loginStatus == 403) {
+                *failureReason = "Acesso ao mod negado por politica da conta ou do dispositivo.";
+            } else if (loginStatus >= 500) {
+                *failureReason = "Servidor indisponivel no momento. Tente novamente.";
+            } else {
+                *failureReason = "Falha na autenticacao do mod.";
+            }
+        }
         return false;
     }
 
