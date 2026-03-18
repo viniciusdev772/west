@@ -69,6 +69,7 @@ enum DropGoodsType {
 bool Health = false;
 bool aimBotAggressive = false;       // ⚡ Aimbot agressivo (mais tentativas por frame)
 bool alwaysHeadshot = false;         // 💀 Força todos os tiros como headshot
+bool killNearbyOnWeaponSwap = false; // 🔄 Mata NPCs proximos ao trocar de arma
 bool flyMode = false;                // 🕊️ Modo voo experimental
 bool npcFlyMode = false;             // ☁️ Faz NPCs ativos levitarem sem depender de filtro hostil
 bool npcWarMode = false;             // ⚔️ Faz NPCs hostis entrarem em conflito entre si
@@ -90,6 +91,7 @@ int sliderValue = 1, Moedas = 0, Gems = 0;
 int espSnaplineOriginMode = 0;       // 0 = topo, 1 = centro, 2 = base
 float flyVerticalSpeed = 5.0f;
 float flyHeightStep = 1.0f;
+float weaponSwapKillRadius = 8.0f;
 float npcFlyLift = 1.2f;
 float npcFlyHoverHeight = 1.6f;
 float npcFlyDriftScale = 1.0f;
@@ -258,6 +260,7 @@ typedef void (*PlayerSetCurrentVelocityFunc)(void* thisPtr, Vector3 velocity, vo
 typedef void (*PlayerTranslateWithSamplePosFunc)(void* thisPtr, Vector3 velocity, void* method);
 typedef void (*PlayerDisableMoveColliderFunc)(void* thisPtr, void* method);
 typedef void (*PlayerEnableMoveColliderFunc)(void* thisPtr, void* method);
+typedef int (*PlayerGetCurrentGunTypeFunc)(void* thisPtr, void* method);
 typedef Vector3 (*PlayerGetCurrentVelocityFunc)(void* thisPtr, void* method);
 typedef bool (*PlayerIsMovingFunc)(void* thisPtr, void* method);
 typedef Vector3 (*PlayerHeadingFunc)(void* thisPtr, void* method);
@@ -489,6 +492,8 @@ void ClearCompleteESP();
 bool CanRunAutoKill();
 int CollectActiveEnemyBases(void** outEnemies, int maxEnemies);
 void RunAutoKillOnce();
+void RunWeaponSwapKillNearbyOnce(float radiusMeters);
+void UpdateWeaponSwapKillMonitor();
 void ProcessGameplayFrame(void* myCtrlPlayer);
 void* GetBulletTailFactoryInstance();
 static bool IsProbablyValidPtr(void* ptr);
@@ -2441,6 +2446,7 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
             Health = false;
             aimBotAggressive = false;
             alwaysHeadshot = false;
+            killNearbyOnWeaponSwap = false;
             flyMode = false;
             npcFlyMode = false;
             npcWarMode = false;
@@ -2618,6 +2624,10 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
         }
     }
 
+    if (killNearbyOnWeaponSwap) {
+        UpdateWeaponSwapKillMonitor();
+    }
+
     if (autoKill && CanRunAutoKill()) {
         static int autoKillFrameCounter = 0;
         autoKillFrameCounter++;
@@ -2728,6 +2738,8 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("CollapseAdd_22_Toggle_Sempre Headshot (15/02/2026)"),
             OBFUSCATE("CollapseAdd_43_Toggle_Auto Kill Seguro (08/03/2026)"),
             OBFUSCATE("CollapseAdd_44_Button_Kill All Agora (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_86_Toggle_Matar Proximos ao Trocar de Arma"),
+            OBFUSCATE("CollapseAdd_87_SeekBar_Raio do Kill na Troca_1_30"),
 
             OBFUSCATE("Collapse_ESP Canvas"),
             OBFUSCATE("CollapseAdd_Category_ESP Canvas"),
@@ -3072,6 +3084,16 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
                 __android_log_print(ANDROID_LOG_INFO, "MOD_AUTOKILL", "Kill All agendado");
             } else {
                 __android_log_print(ANDROID_LOG_WARN, "MOD_AUTOKILL", "Kill All bloqueado: contexto de jogo invalido");
+            }
+            break;
+        case 86: // Matar proximos ao trocar de arma
+            killNearbyOnWeaponSwap = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_AUTOKILL", "Kill por troca de arma %s", killNearbyOnWeaponSwap ? "ativado" : "desativado");
+            break;
+        case 87: // Raio do kill na troca
+            if (value >= 1 && value <= 30) {
+                weaponSwapKillRadius = (float)value;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AUTOKILL", "Raio do kill na troca ajustado para: %.1f", weaponSwapKillRadius);
             }
             break;
         case 45: // Trilhas de Tiro em Todos os Alvos
@@ -3880,6 +3902,139 @@ void RunAutoKillOnce() {
         __android_log_print(ANDROID_LOG_INFO, "MOD_AUTOKILL", "AutoKill tocou %d inimigos, removeu %d", touched, removed);
     } catch (...) {
         __android_log_print(ANDROID_LOG_ERROR, "MOD_AUTOKILL", "Falha protegida em RunAutoKillOnce");
+    }
+}
+
+void RunWeaponSwapKillNearbyOnce(float radiusMeters) {
+    if (!CanRunAutoKill()) return;
+
+    try {
+        void* myPlayer = GetMyPlayerInstance();
+        if (!IsProbablyValidPtr(myPlayer)) return;
+
+        Vector3 myPos = {0.0f, 0.0f, 0.0f};
+        if (!GetPlayerWorldPosition(myPlayer, myPos)) return;
+
+        uintptr_t addrBeHit = getAbsoluteAddress(targetLibName, 0x31B830); // PlayerBase.BeHit()
+        uintptr_t addrKilledAI = getAbsoluteAddress(targetLibName, 0x2812C4); // MissionCtrl.KilledAI(Player)
+        uintptr_t addrClearEnemy = getAbsoluteAddress(targetLibName, 0x280390); // MissionCtrl.ClearEnemy(Player)
+        uintptr_t addrMissionContainEnemy = getAbsoluteAddress(targetLibName, 0x480EA0); // MissionEntity.ContainEnemy(PlayerBase)
+        uintptr_t addrMissionDeleteEnemy = getAbsoluteAddress(targetLibName, 0x4811A0); // MissionEntity.DeleteEnemy(PlayerBase)
+        uintptr_t addrFactoryContainPlayerBase = getAbsoluteAddress(targetLibName, 0x2E4A34); // EnemyFactory.ContainPlayerBase(PlayerBase)
+        uintptr_t addrFactoryDeletePlayerBase = getAbsoluteAddress(targetLibName, 0x2E4AB4); // EnemyFactory.DeletePlayerBase(PlayerBase)
+        uintptr_t addrEnemyGC = getAbsoluteAddress(targetLibName, 0x2E791C); // EnermyGC.EnemyGC(Player)
+        if (addrBeHit == 0) return;
+
+        auto beHit = reinterpret_cast<PlayerBaseBeHitFunc>(addrBeHit);
+        auto killedAI = reinterpret_cast<MissionCtrlPlayerActionFunc>(addrKilledAI);
+        auto clearEnemy = reinterpret_cast<MissionCtrlPlayerActionFunc>(addrClearEnemy);
+        auto missionContainEnemy = reinterpret_cast<MissionEntityContainEnemyFunc>(addrMissionContainEnemy);
+        auto missionDeleteEnemy = reinterpret_cast<MissionEntityDeleteEnemyFunc>(addrMissionDeleteEnemy);
+        auto factoryContainPlayerBase = reinterpret_cast<EnemyFactoryContainPlayerBaseFunc>(addrFactoryContainPlayerBase);
+        auto factoryDeletePlayerBase = reinterpret_cast<EnemyFactoryDeletePlayerBaseFunc>(addrFactoryDeletePlayerBase);
+        auto enemyGC = reinterpret_cast<EnemyGCFunc>(addrEnemyGC);
+
+        void* gameCtrl = GetGameCtrlInstance();
+        if (!IsProbablyValidPtr(gameCtrl)) return;
+        void* enermyGC = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x24);
+        void* enemyFactory = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x28);
+        void* missionCtrl = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x2C);
+        void* missionEntity = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x30);
+
+        void* enemies[128] = {};
+        int enemyCount = CollectActiveEnemyBases(enemies, 128);
+        if (enemyCount <= 0) return;
+
+        const float radiusSq = radiusMeters * radiusMeters;
+        int touched = 0;
+        for (int i = 0; i < enemyCount; ++i) {
+            void* enemyBase = enemies[i];
+            if (!IsProbablyValidPtr(enemyBase)) continue;
+
+            void* player = nullptr;
+            int baseType = -1;
+            int animalType = -1;
+            int gunID = 0;
+            Vector3 enemyPos = {0.0f, 0.0f, 0.0f};
+            if (!ResolveCombatData(enemyBase, &player, baseType, animalType, gunID, enemyPos)) continue;
+
+            float dx = enemyPos.x - myPos.x;
+            float dy = enemyPos.y - myPos.y;
+            float dz = enemyPos.z - myPos.z;
+            float distanceSq = dx * dx + dy * dy + dz * dz;
+            if (distanceSq > radiusSq) continue;
+
+            void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemyBase) + 0x14);
+            if (!IsProbablyValidPtr(baseData)) continue;
+            void* property = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0x8);
+            if (!IsProbablyValidPtr(property)) continue;
+
+            int currentBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x14);
+            int maxBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x10);
+            if (currentBlood <= 0 || maxBlood <= 0) continue;
+
+            int lethalDamage = currentBlood + maxBlood + 5000;
+            beHit(enemyBase, lethalDamage, 0, nullptr);
+            touched++;
+
+            if (IsProbablyValidPtr(missionCtrl) && IsProbablyValidPtr(player)) {
+                if (addrKilledAI != 0) killedAI(missionCtrl, player, nullptr);
+                if (addrClearEnemy != 0) clearEnemy(missionCtrl, player, nullptr);
+            }
+
+            if (IsProbablyValidPtr(missionEntity) && addrMissionContainEnemy != 0 && addrMissionDeleteEnemy != 0) {
+                if (missionContainEnemy(missionEntity, enemyBase, nullptr)) {
+                    missionDeleteEnemy(missionEntity, enemyBase, nullptr);
+                }
+            }
+
+            if (IsProbablyValidPtr(enemyFactory) && addrFactoryContainPlayerBase != 0 && addrFactoryDeletePlayerBase != 0) {
+                if (factoryContainPlayerBase(enemyFactory, enemyBase, nullptr)) {
+                    factoryDeletePlayerBase(enemyFactory, enemyBase, nullptr);
+                }
+            }
+
+            if (IsProbablyValidPtr(enermyGC) && IsProbablyValidPtr(player) && addrEnemyGC != 0) {
+                enemyGC(enermyGC, player, nullptr);
+            }
+        }
+
+        if (touched > 0) {
+            __android_log_print(ANDROID_LOG_INFO, "MOD_AUTOKILL", "Kill por troca de arma tocou %d inimigos em %.1fm", touched, radiusMeters);
+        }
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_AUTOKILL", "Falha protegida em RunWeaponSwapKillNearbyOnce");
+    }
+}
+
+void UpdateWeaponSwapKillMonitor() {
+    static bool initialized = false;
+    static int lastGunType = -1;
+
+    void* myPlayer = GetMyPlayerInstance();
+    if (!IsProbablyValidPtr(myPlayer)) {
+        initialized = false;
+        lastGunType = -1;
+        return;
+    }
+
+    uintptr_t addrGetCurrentGunType = getAbsoluteAddress(targetLibName, 0x3455A4); // Player.GetCurrentGunType()
+    if (addrGetCurrentGunType == 0) return;
+
+    auto getCurrentGunType = reinterpret_cast<PlayerGetCurrentGunTypeFunc>(addrGetCurrentGunType);
+    int currentGunType = getCurrentGunType(myPlayer, nullptr);
+
+    if (!initialized) {
+        initialized = true;
+        lastGunType = currentGunType;
+        return;
+    }
+
+    if (currentGunType != lastGunType) {
+        lastGunType = currentGunType;
+        if (killNearbyOnWeaponSwap && CanRunAutoKill()) {
+            RunWeaponSwapKillNearbyOnce(weaponSwapKillRadius);
+        }
     }
 }
 
