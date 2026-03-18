@@ -28,7 +28,6 @@ public class ESPView extends View {
                 return;
             }
             postInvalidateOnAnimation();
-            scheduleNextFrame();
         }
     };
     private boolean rendering = false;
@@ -75,6 +74,10 @@ public class ESPView extends View {
         if (activeRenderer != null) {
             activeRenderer.draw(this, canvas);
         }
+
+        if (rendering) {
+            postOnAnimation(frameTicker);
+        }
     }
 
     @Override
@@ -98,18 +101,12 @@ public class ESPView extends View {
             return;
         }
         rendering = true;
-        scheduleNextFrame();
+        postOnAnimation(frameTicker);
     }
 
     private void stopRendering() {
         rendering = false;
         removeCallbacks(frameTicker);
-    }
-
-    private void scheduleNextFrame() {
-        removeCallbacks(frameTicker);
-        long frameDelay = FPS >= 60 ? 16L : Math.max(16L, 1000L / Math.max(1, FPS));
-        postDelayed(frameTicker, frameDelay);
     }
 
     private void initializePaints() {
