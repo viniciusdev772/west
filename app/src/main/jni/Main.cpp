@@ -1434,6 +1434,10 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
     if (!espCanvas) return;
     if (!EnsureEspJniMethods(env, espView)) return;
 
+    const bool wantsOnScreenBox = espShowBox || espShowSkeleton || espShowSnapline || espShowLabel;
+    const bool wantsOffscreen360 = espShowOffscreen360;
+    if (!wantsOnScreenBox && !wantsOffscreen360) return;
+
     void* myPlayer = GetMyPlayerInstance();
     if (!IsProbablyValidPtr(myPlayer)) return;
 
@@ -1451,8 +1455,8 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
     Vector3 myPos = {0.0f, 0.0f, 0.0f};
     if (!GetPlayerWorldPosition(myPlayer, myPos)) return;
 
-    void* enemies[256] = {};
-    int enemyCount = CollectActiveEnemyBases(enemies, 256);
+    void* enemies[128] = {};
+    int enemyCount = CollectActiveEnemyBases(enemies, 128);
     for (int i = 0; i < enemyCount; ++i) {
         void* enemyBase = enemies[i];
         if (!IsProbablyValidPtr(enemyBase)) continue;
@@ -1497,32 +1501,47 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
         }
 
         bool drewOnScreenEsp = false;
+        bool targetIsOnScreen = false;
         ScreenBox box{};
         float boxWidth = 0.0f;
         float boxHeight = 0.0f;
         float centerX = 0.0f;
         float targetY = 0.0f;
-        if (TryBuildScreenBoxForPlayer(player, box)) {
-            boxWidth = box.right - box.left;
-            boxHeight = box.bottom - box.top;
-            centerX = box.left + (boxWidth * 0.5f);
-            targetY = box.top + (boxHeight * 0.5f);
+        Vector3 rawScreen = {0.0f, 0.0f, 0.0f};
+        bool hasRawScreen = false;
 
-            const bool boxVisibleOnScreen =
-                    box.right >= 0.0f &&
-                    box.left <= static_cast<float>(screenWidth) &&
-                    box.bottom >= 0.0f &&
-                    box.top <= static_cast<float>(screenHeight);
+        if (wantsOnScreenBox) {
+            if (TryBuildScreenBoxForPlayer(player, box)) {
+                boxWidth = box.right - box.left;
+                boxHeight = box.bottom - box.top;
+                centerX = box.left + (boxWidth * 0.5f);
+                targetY = box.top + (boxHeight * 0.5f);
 
-            if (boxVisibleOnScreen) {
-                if (espShowBox) {
-                    DrawEspRect(env, espView, canvas, 220, red, green, blue, espBoxThickness, box.left, box.top, boxWidth, boxHeight);
+                targetIsOnScreen =
+                        box.right >= 0.0f &&
+                        box.left <= static_cast<float>(screenWidth) &&
+                        box.bottom >= 0.0f &&
+                        box.top <= static_cast<float>(screenHeight);
+
+                if (targetIsOnScreen) {
+                    if (espShowBox) {
+                        DrawEspRect(env, espView, canvas, 220, red, green, blue, espBoxThickness, box.left, box.top, boxWidth, boxHeight);
+                    }
+                    if (espShowSkeleton) {
+                        DrawEspSkeleton(env, espView, canvas, player, red, green, blue, std::max(1.2f, espLineThickness));
+                    }
+                    drewOnScreenEsp = true;
                 }
-                if (espShowSkeleton) {
-                    DrawEspSkeleton(env, espView, canvas, player, red, green, blue, std::max(1.2f, espLineThickness));
-                }
-                drewOnScreenEsp = true;
             }
+        } else if (wantsOffscreen360) {
+            if (!ProjectWorldToScreenRaw(enemyPos, rawScreen)) continue;
+            hasRawScreen = true;
+            targetIsOnScreen =
+                    rawScreen.z > 0.01f &&
+                    rawScreen.x >= 0.0f &&
+                    rawScreen.x <= static_cast<float>(screenWidth) &&
+                    rawScreen.y >= 0.0f &&
+                    rawScreen.y <= static_cast<float>(screenHeight);
         }
 
         if (espShowSnapline && drewOnScreenEsp) {
@@ -1545,9 +1564,10 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
             DrawEspText(env, espView, canvas, 235, 255, 255, 255, label, centerX, box.top - 10.0f, espTextSize);
         }
 
-        if (!drewOnScreenEsp && espShowOffscreen360) {
-            Vector3 rawScreen = {0.0f, 0.0f, 0.0f};
-            if (!ProjectWorldToScreenRaw(enemyPos, rawScreen)) continue;
+        if (!targetIsOnScreen && espShowOffscreen360) {
+            if (!hasRawScreen && !ProjectWorldToScreenRaw(enemyPos, rawScreen)) {
+                continue;
+            }
 
             float dirX = rawScreen.x - screenCenterX;
             float dirY = rawScreen.y - screenCenterY;
