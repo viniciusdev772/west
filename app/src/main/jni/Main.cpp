@@ -70,8 +70,9 @@ bool Health = false;
 bool aimBotAggressive = false;       // ⚡ Aimbot agressivo (mais tentativas por frame)
 bool alwaysHeadshot = false;         // 💀 Força todos os tiros como headshot
 bool flyMode = false;                // 🕊️ Modo voo experimental
-bool npcFlyMode = false;             // ☁️ Levita NPCs hostis usando o mesmo Player da dump
+bool npcFlyMode = false;             // ☁️ Faz NPCs ativos levitarem sem depender de filtro hostil
 bool npcWarMode = false;             // ⚔️ Faz NPCs hostis entrarem em conflito entre si
+bool npcFlyHoverWave = false;        // 🌊 Oscilação leve na altura do hover dos NPCs
 bool espCanvas = false;              // 🖼️ ESP desenhada via ESPView Java
 bool completeEsp = false;            // 👁️ ESP completo com barras de vida
 bool autoKill = false;               // ☠️ Mata inimigos ativos com BeHit
@@ -90,6 +91,10 @@ int espSnaplineOriginMode = 0;       // 0 = topo, 1 = centro, 2 = base
 float flyVerticalSpeed = 5.0f;
 float flyHeightStep = 1.0f;
 float npcFlyLift = 1.2f;
+float npcFlyHoverHeight = 1.6f;
+float npcFlyDriftScale = 1.0f;
+float npcFlyHoverResponsiveness = 0.8f;
+float npcFlyHoverWaveAmplitude = 0.15f;
 float espBoxThickness = 2.0f;
 float espLineThickness = 1.4f;
 float espTextSize = 18.0f;
@@ -98,7 +103,11 @@ float espSnaplineOffsetY = 30.0f;
 int espColorRed = 255;
 int espColorGreen = 90;
 int espColorBlue = 90;
-void* npcFlightTargetPlayer = nullptr;
+static constexpr int kMaxNpcFlightPlayers = 64;
+void* npcFlightPlayers[kMaxNpcFlightPlayers] = {};
+float npcFlightBaseY[kMaxNpcFlightPlayers] = {};
+float npcFlightTargetY[kMaxNpcFlightPlayers] = {};
+int npcFlightPlayerCount = 0;
 jmethodID gEspDrawLineMethod = nullptr;
 jmethodID gEspDrawRectMethod = nullptr;
 jmethodID gEspDrawTextMethod = nullptr;
@@ -247,6 +256,8 @@ typedef void (*PlayerSetNavMeshEnableFunc)(void* thisPtr, bool enable, void* met
 typedef void (*PlayerSetNavMeshSpeedFunc)(void* thisPtr, float speed, void* method);
 typedef void (*PlayerSetCurrentVelocityFunc)(void* thisPtr, Vector3 velocity, void* method);
 typedef void (*PlayerTranslateWithSamplePosFunc)(void* thisPtr, Vector3 velocity, void* method);
+typedef void (*PlayerDisableMoveColliderFunc)(void* thisPtr, void* method);
+typedef void (*PlayerEnableMoveColliderFunc)(void* thisPtr, void* method);
 typedef Vector3 (*PlayerGetCurrentVelocityFunc)(void* thisPtr, void* method);
 typedef bool (*PlayerIsMovingFunc)(void* thisPtr, void* method);
 typedef Vector3 (*PlayerHeadingFunc)(void* thisPtr, void* method);
@@ -540,7 +551,11 @@ static bool TryBuildScreenBoxForPlayer(void* player, ScreenBox& outBox);
 static float Vector3LengthXZ(const Vector3& value);
 static Vector3 NormalizeXZ(const Vector3& value);
 static float ClampMagnitudeXZ(float value, float minValue, float maxValue);
-static bool IsFlyableEnemyBase(void* enemyBase, void** outPlayer);
+static bool IsFlyableNpcPlayer(void* player);
+static void ClearTrackedNpcFlightPlayers();
+static bool IsTrackedNpcFlightPlayer(void* player);
+static void TrackNpcFlightPlayer(void* player);
+static void RestoreTrackedNpcFlightPlayers();
 static void* GetPlayerBaseFromPlayer(void* player);
 static void* ResolveTargetPlayerForBulletTail();
 static void* ResolveNpcFlightTargetPlayer();
@@ -1695,28 +1710,43 @@ static bool IsPoliceWarEligiblePlayer(void* player, void** outPlayerBase, Vector
     }
 }
 
-static bool IsFlyableEnemyBase(void* enemyBase, void** outPlayer) {
-    if (outPlayer) *outPlayer = nullptr;
-
-    void* player = nullptr;
+static bool IsFlyableNpcPlayer(void* player) {
     int baseType = -1;
     int animalType = -1;
     int gunID = 0;
-    Vector3 pos = {0.0f, 0.0f, 0.0f};
-    if (!ResolveCombatData(enemyBase, &player, baseType, animalType, gunID, pos)) return false;
-    if (!IsProbablyValidPtr(player)) return false;
-
-    const bool isHostileHuman = (baseType == EnemyNPC);
-    const bool isHostileMonster = (baseType == Zombies || baseType == Ogre);
-    const bool isHostileAnimal =
-            (baseType == Animal) &&
-            (animalType == Cheetah || animalType == Bear || animalType == Wolf01 ||
-             animalType == Wolf02 || animalType == Wolf03);
-
-    if (!(isHostileHuman || isHostileMonster || isHostileAnimal)) return false;
-
-    if (outPlayer) *outPlayer = player;
+    if (!ResolvePlayerMetaFromPlayer(player, baseType, animalType, gunID, nullptr)) return false;
+    if (!IsProbablyValidPtr(player) || player == GetMyPlayerInstance()) return false;
+    if (baseType == Cowboy || baseType == Horse || animalType == AnimalCowboy) return false;
     return true;
+}
+
+static void ClearTrackedNpcFlightPlayers() {
+    npcFlightPlayerCount = 0;
+    for (int i = 0; i < kMaxNpcFlightPlayers; ++i) {
+        npcFlightPlayers[i] = nullptr;
+        npcFlightBaseY[i] = 0.0f;
+        npcFlightTargetY[i] = 0.0f;
+    }
+}
+
+static bool IsTrackedNpcFlightPlayer(void* player) {
+    if (!IsProbablyValidPtr(player)) return false;
+    for (int i = 0; i < npcFlightPlayerCount; ++i) {
+        if (npcFlightPlayers[i] == player) return true;
+    }
+    return false;
+}
+
+static void TrackNpcFlightPlayer(void* player) {
+    if (!IsProbablyValidPtr(player) || IsTrackedNpcFlightPlayer(player) || npcFlightPlayerCount >= kMaxNpcFlightPlayers) return;
+    npcFlightPlayers[npcFlightPlayerCount++] = player;
+}
+
+static void RestoreTrackedNpcFlightPlayers() {
+    for (int i = 0; i < npcFlightPlayerCount; ++i) {
+        RestoreSingleEnemyFlightState(npcFlightPlayers[i]);
+    }
+    ClearTrackedNpcFlightPlayers();
 }
 
 static void RestoreSingleEnemyFlightState(void* enemyPlayer) {
@@ -1725,68 +1755,23 @@ static void RestoreSingleEnemyFlightState(void* enemyPlayer) {
     uintptr_t addrSetNavMeshEnable = getAbsoluteAddress(targetLibName, 0x34897C); // Player.SetNavMesEnable(bool)
     uintptr_t addrSetCurrentVelocity = getAbsoluteAddress(targetLibName, 0x35C8F8); // Player.SetCurrentVelocity(Vector3)
     uintptr_t addrSetNavMeshSpeed = getAbsoluteAddress(targetLibName, 0x35C038); // Player.SetNavMesSpeed(float)
+    uintptr_t addrEnableMoveCollider = getAbsoluteAddress(targetLibName, 0x3603BC); // Player.EnableMoveCollider()
     if (addrSetNavMeshEnable == 0 || addrSetCurrentVelocity == 0) return;
 
     auto setNavMeshEnable = reinterpret_cast<PlayerSetNavMeshEnableFunc>(addrSetNavMeshEnable);
     auto setCurrentVelocity = reinterpret_cast<PlayerSetCurrentVelocityFunc>(addrSetCurrentVelocity);
     auto setNavMeshSpeed = reinterpret_cast<PlayerSetNavMeshSpeedFunc>(addrSetNavMeshSpeed);
+    auto enableMoveCollider = reinterpret_cast<PlayerEnableMoveColliderFunc>(addrEnableMoveCollider);
 
     Vector3 zeroVel = {0.0f, 0.0f, 0.0f};
     setNavMeshEnable(enemyPlayer, true, nullptr);
     if (addrSetNavMeshSpeed != 0) {
         setNavMeshSpeed(enemyPlayer, 4.0f, nullptr);
     }
+    if (addrEnableMoveCollider != 0) {
+        enableMoveCollider(enemyPlayer, nullptr);
+    }
     setCurrentVelocity(enemyPlayer, zeroVel, nullptr);
-}
-
-static void* ResolveNpcFlightTargetPlayer() {
-    void* myCtrlPlayer = GetMyCtrlPlayerInstance();
-    void* myPlayer = GetMyPlayerInstance();
-    if (!IsProbablyValidPtr(myCtrlPlayer) || !IsProbablyValidPtr(myPlayer)) return nullptr;
-
-    void* preferredTarget = ResolveBestAggressiveAimTarget(myCtrlPlayer);
-    if (!IsProbablyValidPtr(preferredTarget)) {
-        preferredTarget = FindBestTarget(myCtrlPlayer);
-    }
-
-    void* enemies[64] = {};
-    int enemyCount = CollectActiveEnemyBases(enemies, 64);
-    if (enemyCount <= 0) return nullptr;
-
-    if (IsProbablyValidPtr(preferredTarget)) {
-        for (int i = 0; i < enemyCount; ++i) {
-            void* enemyPlayer = nullptr;
-            if (!IsFlyableEnemyBase(enemies[i], &enemyPlayer)) continue;
-            if (IsProbablyValidPtr(enemyPlayer) && PlayerContainsTransform(enemyPlayer, preferredTarget)) {
-                return enemyPlayer;
-            }
-        }
-    }
-
-    void* bestPlayer = nullptr;
-    float bestDistanceSq = 1.0e30f;
-    Vector3 myPos = {0.0f, 0.0f, 0.0f};
-    if (!GetPlayerWorldPosition(myPlayer, myPos)) return nullptr;
-
-    for (int i = 0; i < enemyCount; ++i) {
-        void* enemyPlayer = nullptr;
-        if (!IsFlyableEnemyBase(enemies[i], &enemyPlayer)) continue;
-        if (!IsProbablyValidPtr(enemyPlayer)) continue;
-
-        Vector3 enemyPos = {0.0f, 0.0f, 0.0f};
-        if (!GetPlayerWorldPosition(enemyPlayer, enemyPos)) continue;
-
-        float dx = enemyPos.x - myPos.x;
-        float dy = enemyPos.y - myPos.y;
-        float dz = enemyPos.z - myPos.z;
-        float distanceSq = dx * dx + dy * dy + dz * dz;
-        if (distanceSq < bestDistanceSq) {
-            bestDistanceSq = distanceSq;
-            bestPlayer = enemyPlayer;
-        }
-    }
-
-    return bestPlayer;
 }
 
 void LogWorldToScreenSamples() {
@@ -2008,23 +1993,15 @@ void ApplyFlyMovementFrame(void* myCtrlPlayer) {
 
 void SetEnemyFlightState(bool enabled) {
     if (!enabled) {
-        RestoreSingleEnemyFlightState(npcFlightTargetPlayer);
-        npcFlightTargetPlayer = nullptr;
+        RestoreTrackedNpcFlightPlayers();
         return;
     }
 
-    void* targetEnemyPlayer = ResolveNpcFlightTargetPlayer();
-    if (IsProbablyValidPtr(targetEnemyPlayer)) {
-        npcFlightTargetPlayer = targetEnemyPlayer;
-    }
+    ClearTrackedNpcFlightPlayers();
 }
 
 void ApplyEnemyFlyMovementFrame() {
     if (!npcFlyMode) return;
-
-    static int enemyFlyFrameCounter = 0;
-    enemyFlyFrameCounter++;
-    if ((enemyFlyFrameCounter % 2) != 0) return;
 
     uintptr_t addrSetNavMeshEnable = getAbsoluteAddress(targetLibName, 0x34897C); // Player.SetNavMesEnable(bool)
     uintptr_t addrSetNavMeshSpeed = getAbsoluteAddress(targetLibName, 0x35C038); // Player.SetNavMesSpeed(float)
@@ -2035,6 +2012,7 @@ void ApplyEnemyFlyMovementFrame() {
     uintptr_t addrSetCurrentVelocity = getAbsoluteAddress(targetLibName, 0x35C8F8); // Player.SetCurrentVelocity(Vector3)
     uintptr_t addrTranslateWithSamplePos = getAbsoluteAddress(targetLibName, 0x35CB9C); // Player.TranslateWithSamplePos(Vector3)
     uintptr_t addrRotateToDir = getAbsoluteAddress(targetLibName, 0x344E34); // Player.RotateToDir(Vector3)
+    uintptr_t addrDisableMoveCollider = getAbsoluteAddress(targetLibName, 0x360304); // Player.DisableMoveCollider()
     if (addrSetNavMeshEnable == 0 || addrGetPosition == 0 || addrSetPosition == 0 ||
         addrGetCurrentVelocity == 0 || addrSetCurrentVelocity == 0 || addrTranslateWithSamplePos == 0) {
         return;
@@ -2049,59 +2027,130 @@ void ApplyEnemyFlyMovementFrame() {
     auto setCurrentVelocity = reinterpret_cast<PlayerSetCurrentVelocityFunc>(addrSetCurrentVelocity);
     auto translateWithSamplePos = reinterpret_cast<PlayerTranslateWithSamplePosFunc>(addrTranslateWithSamplePos);
     auto rotateToDir = reinterpret_cast<PlayerRotateToDirFunc>(addrRotateToDir);
+    auto disableMoveCollider = reinterpret_cast<PlayerDisableMoveColliderFunc>(addrDisableMoveCollider);
 
     try {
-        void* targetEnemyPlayer = ResolveNpcFlightTargetPlayer();
-        if (!IsProbablyValidPtr(targetEnemyPlayer)) {
-            RestoreSingleEnemyFlightState(npcFlightTargetPlayer);
-            npcFlightTargetPlayer = nullptr;
+        static int npcHoverTick = 0;
+        npcHoverTick++;
+
+        void* livingPlayers[kMaxNpcFlightPlayers] = {};
+        int livingCount = CollectLivingPlayers(livingPlayers, kMaxNpcFlightPlayers);
+        if (livingCount <= 0) {
+            RestoreTrackedNpcFlightPlayers();
             return;
         }
 
-        if (IsProbablyValidPtr(npcFlightTargetPlayer) && npcFlightTargetPlayer != targetEnemyPlayer) {
-            RestoreSingleEnemyFlightState(npcFlightTargetPlayer);
-        }
-        npcFlightTargetPlayer = targetEnemyPlayer;
-
-        setNavMeshEnable(targetEnemyPlayer, false, nullptr);
-        if (addrSetNavMeshSpeed != 0) {
-            setNavMeshSpeed(targetEnemyPlayer, 0.0f, nullptr);
-        }
-
-        Vector3 currentPos = getPosition(targetEnemyPlayer, nullptr);
-        Vector3 currentVelocity = getCurrentVelocity(targetEnemyPlayer, nullptr);
-        Vector3 heading = addrHeading != 0 ? getHeading(targetEnemyPlayer, nullptr) : Vector3{0.0f, 0.0f, 0.0f};
-        Vector3 drift = NormalizeXZ(heading);
-        if (Vector3LengthXZ(drift) <= 0.001f) {
-            drift = NormalizeXZ(currentVelocity);
+        void* framePlayers[kMaxNpcFlightPlayers] = {};
+        int framePlayerCount = 0;
+        void* previousPlayers[kMaxNpcFlightPlayers] = {};
+        float previousBaseY[kMaxNpcFlightPlayers] = {};
+        float previousTargetY[kMaxNpcFlightPlayers] = {};
+        int previousCount = npcFlightPlayerCount;
+        for (int i = 0; i < previousCount; ++i) {
+            previousPlayers[i] = npcFlightPlayers[i];
+            previousBaseY[i] = npcFlightBaseY[i];
+            previousTargetY[i] = npcFlightTargetY[i];
         }
 
-        const float liftPerTick = 0.10f + (npcFlyLift * 0.12f);
-        float driftSpeed = Vector3LengthXZ(currentVelocity) * 0.16f;
-        driftSpeed = ClampMagnitudeXZ(driftSpeed, 0.10f, 1.10f);
+        for (int i = 0; i < livingCount && framePlayerCount < kMaxNpcFlightPlayers; ++i) {
+            void* enemyPlayer = livingPlayers[i];
+            if (!IsFlyableNpcPlayer(enemyPlayer)) continue;
+            framePlayers[framePlayerCount++] = enemyPlayer;
+        }
 
-        Vector3 desiredVelocity = {0.0f, liftPerTick, 0.0f};
-        Vector3 nextPos = currentPos;
-        nextPos.y += liftPerTick;
-
-        if (Vector3LengthXZ(drift) > 0.001f) {
-            desiredVelocity.x = drift.x * driftSpeed;
-            desiredVelocity.z = drift.z * driftSpeed;
-            nextPos.x += desiredVelocity.x;
-            nextPos.z += desiredVelocity.z;
-            if (addrRotateToDir != 0) {
-                rotateToDir(targetEnemyPlayer, drift, nullptr);
+        for (int i = 0; i < previousCount; ++i) {
+            void* trackedPlayer = previousPlayers[i];
+            bool stillTracked = false;
+            for (int j = 0; j < framePlayerCount; ++j) {
+                if (framePlayers[j] == trackedPlayer) {
+                    stillTracked = true;
+                    break;
+                }
             }
-        } else {
-            desiredVelocity.x = currentVelocity.x * 0.02f;
-            desiredVelocity.z = currentVelocity.z * 0.02f;
-            nextPos.x += desiredVelocity.x;
-            nextPos.z += desiredVelocity.z;
+            if (!stillTracked) {
+                RestoreSingleEnemyFlightState(trackedPlayer);
+            }
         }
 
-        setCurrentVelocity(targetEnemyPlayer, desiredVelocity, nullptr);
-        setPosition(targetEnemyPlayer, nextPos, nullptr);
-        translateWithSamplePos(targetEnemyPlayer, desiredVelocity, nullptr);
+        ClearTrackedNpcFlightPlayers();
+
+        for (int i = 0; i < framePlayerCount; ++i) {
+            void* enemyPlayer = framePlayers[i];
+            if (!IsProbablyValidPtr(enemyPlayer)) continue;
+
+            TrackNpcFlightPlayer(enemyPlayer);
+
+            setNavMeshEnable(enemyPlayer, false, nullptr);
+            if (addrSetNavMeshSpeed != 0) {
+                setNavMeshSpeed(enemyPlayer, 0.0f, nullptr);
+            }
+            if (addrDisableMoveCollider != 0) {
+                disableMoveCollider(enemyPlayer, nullptr);
+            }
+
+            Vector3 currentPos = getPosition(enemyPlayer, nullptr);
+            Vector3 currentVelocity = getCurrentVelocity(enemyPlayer, nullptr);
+            int previousIndex = -1;
+            for (int j = 0; j < previousCount; ++j) {
+                if (previousPlayers[j] == enemyPlayer) {
+                    previousIndex = j;
+                    break;
+                }
+            }
+
+            float baseY = (previousIndex >= 0) ? previousBaseY[previousIndex] : currentPos.y;
+            float targetY = baseY + npcFlyHoverHeight;
+            if (npcFlyHoverWave) {
+                float phase = (npcHoverTick * 0.08f) + (i * 0.65f);
+                targetY += sinf(phase) * npcFlyHoverWaveAmplitude;
+            }
+
+            Vector3 heading = addrHeading != 0 ? getHeading(enemyPlayer, nullptr) : Vector3{0.0f, 0.0f, 0.0f};
+            Vector3 drift = NormalizeXZ(heading);
+            if (Vector3LengthXZ(drift) <= 0.001f) {
+                drift = NormalizeXZ(currentVelocity);
+            }
+
+            const float hoverResponse = 0.04f + (npcFlyHoverResponsiveness * 0.08f);
+            const float maxVerticalStep = 0.04f + (npcFlyLift * 0.05f) + (flyHeightStep * 0.01f);
+            float verticalStep = (targetY - currentPos.y) * hoverResponse;
+            if (verticalStep > maxVerticalStep) verticalStep = maxVerticalStep;
+            if (verticalStep < -maxVerticalStep) verticalStep = -maxVerticalStep;
+            if (fabsf(targetY - currentPos.y) < 0.015f) verticalStep = 0.0f;
+
+            float driftSpeed = npcFlyDriftScale * (0.08f + (Vector3LengthXZ(currentVelocity) * 0.10f));
+            driftSpeed = ClampMagnitudeXZ(driftSpeed, 0.02f, 0.75f);
+
+            Vector3 desiredVelocity = {0.0f, verticalStep, 0.0f};
+            Vector3 nextPos = currentPos;
+            nextPos.y += verticalStep;
+
+            if (Vector3LengthXZ(drift) > 0.001f) {
+                desiredVelocity.x = drift.x * driftSpeed;
+                desiredVelocity.z = drift.z * driftSpeed;
+                nextPos.x += desiredVelocity.x;
+                nextPos.z += desiredVelocity.z;
+                if (addrRotateToDir != 0) {
+                    rotateToDir(enemyPlayer, drift, nullptr);
+                }
+            } else {
+                desiredVelocity.x = currentVelocity.x * 0.04f;
+                desiredVelocity.z = currentVelocity.z * 0.04f;
+                nextPos.x += desiredVelocity.x;
+                nextPos.z += desiredVelocity.z;
+            }
+
+            setCurrentVelocity(enemyPlayer, desiredVelocity, nullptr);
+            Vector3 translateVelocity = {desiredVelocity.x, 0.0f, desiredVelocity.z};
+            translateWithSamplePos(enemyPlayer, translateVelocity, nullptr);
+            setPosition(enemyPlayer, nextPos, nullptr);
+
+            int trackedIndex = npcFlightPlayerCount - 1;
+            if (trackedIndex >= 0 && trackedIndex < kMaxNpcFlightPlayers) {
+                npcFlightBaseY[trackedIndex] = baseY;
+                npcFlightTargetY[trackedIndex] = targetY;
+            }
+        }
     } catch (...) {
     }
 }
@@ -2722,8 +2771,13 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
             OBFUSCATE("CollapseAdd_32_Toggle_Modo Voo (Experimental) (15/02/2026)"),
             OBFUSCATE("CollapseAdd_33_SeekBar_Velocidade Vertical_1_20"),
             OBFUSCATE("CollapseAdd_34_SeekBar_Ganho de Altura_1_50"),
-            OBFUSCATE("CollapseAdd_50_Toggle_NPCs Hostis Voadores (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_51_SeekBar_Intensidade do Voo NPC_1_30"),
+            OBFUSCATE("CollapseAdd_50_Toggle_NPCs Voadores (08/03/2026)"),
+            OBFUSCATE("CollapseAdd_51_SeekBar_Forca do Hover NPC_1_30"),
+            OBFUSCATE("CollapseAdd_81_SeekBar_Altura do Hover NPC_1_40"),
+            OBFUSCATE("CollapseAdd_82_SeekBar_Drift Horizontal NPC_1_30"),
+            OBFUSCATE("CollapseAdd_83_SeekBar_Suavidade do Hover NPC_1_20"),
+            OBFUSCATE("CollapseAdd_84_Toggle_Oscilacao do Hover NPC"),
+            OBFUSCATE("CollapseAdd_85_SeekBar_Amplitude da Oscilacao NPC_1_20"),
 
             OBFUSCATE("Collapse_Policia"),
             OBFUSCATE("CollapseAdd_Category_Policia"),
@@ -2885,19 +2939,47 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
                 ApplyFlyPositionStep(); // efeito imediato ao mover slider
             }
             break;
-        case 50: // NPCs hostis voadores
+        case 50: // NPCs voadores
             npcFlyMode = boolean;
             if (boolean) {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "NPCs hostis voadores ativados");
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "NPCs voadores ativados");
             } else {
-                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "NPCs hostis voadores desativados");
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "NPCs voadores desativados");
             }
             SetEnemyFlightState(npcFlyMode);
             break;
-        case 51: // Intensidade do voo NPC
+        case 51: // Forca do hover NPC
             if (value >= 1 && value <= 30) {
                 npcFlyLift = (float)value / 10.0f;
-                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Intensidade do voo NPC ajustada para: %.2f", npcFlyLift);
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Forca do hover NPC ajustada para: %.2f", npcFlyLift);
+            }
+            break;
+        case 81: // Altura do hover NPC
+            if (value >= 1 && value <= 40) {
+                npcFlyHoverHeight = (float)value / 10.0f;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Altura do hover NPC ajustada para: %.2f", npcFlyHoverHeight);
+            }
+            break;
+        case 82: // Drift horizontal NPC
+            if (value >= 1 && value <= 30) {
+                npcFlyDriftScale = (float)value / 10.0f;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Drift horizontal NPC ajustado para: %.2f", npcFlyDriftScale);
+            }
+            break;
+        case 83: // Suavidade do hover NPC
+            if (value >= 1 && value <= 20) {
+                npcFlyHoverResponsiveness = (float)value / 10.0f;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Suavidade do hover NPC ajustada para: %.2f", npcFlyHoverResponsiveness);
+            }
+            break;
+        case 84: // Oscilacao do hover NPC
+            npcFlyHoverWave = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Oscilacao do hover NPC %s", npcFlyHoverWave ? "ativada" : "desativada");
+            break;
+        case 85: // Amplitude da oscilacao NPC
+            if (value >= 1 && value <= 20) {
+                npcFlyHoverWaveAmplitude = (float)value / 20.0f;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_FLY", "Amplitude da oscilacao NPC ajustada para: %.2f", npcFlyHoverWaveAmplitude);
             }
             break;
         case 52: // Chaos Time
