@@ -214,6 +214,46 @@ int CalculateRemainingDaysFromIsoUtc(const std::string& isoText) {
     return static_cast<int>(remainingSeconds / 86400.0) + 1;
 }
 
+std::string FormatIsoUtcForSaoPauloDisplay(const std::string& isoText) {
+    if (isoText.size() < 19) return isoText;
+
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    if (std::sscanf(isoText.c_str(), "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute, &second) != 6) {
+        return isoText;
+    }
+
+    std::tm utcTm{};
+    utcTm.tm_year = year - 1900;
+    utcTm.tm_mon = month - 1;
+    utcTm.tm_mday = day;
+    utcTm.tm_hour = hour;
+    utcTm.tm_min = minute;
+    utcTm.tm_sec = second;
+
+    const time_t utcTime = timegm(&utcTm);
+    if (utcTime <= 0) return isoText;
+
+    constexpr time_t kSaoPauloOffsetSeconds = 3 * 60 * 60;
+    const time_t saoPauloTime = utcTime - kSaoPauloOffsetSeconds;
+    std::tm saoPauloTm{};
+    if (!gmtime_r(&saoPauloTime, &saoPauloTm)) return isoText;
+
+    char formatted[64] = {0};
+    std::snprintf(formatted, sizeof(formatted), "%02d/%02d/%04d %02d:%02d:%02d (UTC-03:00)",
+                  saoPauloTm.tm_mday,
+                  saoPauloTm.tm_mon + 1,
+                  saoPauloTm.tm_year + 1900,
+                  saoPauloTm.tm_hour,
+                  saoPauloTm.tm_min,
+                  saoPauloTm.tm_sec);
+    return formatted;
+}
+
 size_t CurlWriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
     if (!userp || !contents) return 0;
     const size_t totalSize = size * nmemb;
@@ -917,6 +957,7 @@ bool PerformBackendLogin(JNIEnv* env, jobject context, const std::string& email,
     const std::string deviceFingerprint = ExtractJsonString(loginResponse, "deviceFingerprint");
     const std::string displayName = ExtractJsonStringAfterAnchor(loginResponse, "\"user\":{", "name");
     const std::string policyExpiresAt = ExtractJsonStringAfterAnchor(loginResponse, "\"policy\":{", "expiresAt");
+    const std::string policyExpiresAtSaoPaulo = FormatIsoUtcForSaoPauloDisplay(policyExpiresAt);
     const int remainingDays = CalculateRemainingDaysFromIsoUtc(policyExpiresAt);
     if (token.empty() || deviceFingerprint.empty()) {
         if (failureReason) *failureReason = "Sessao do mod nao foi emitida corretamente.";
@@ -938,7 +979,7 @@ bool PerformBackendLogin(JNIEnv* env, jobject context, const std::string& email,
             "{\"displayName\":\"%s\",\"remainingDays\":%d,\"expiresAt\":\"%s\",\"deviceFingerprint\":\"%s\"}",
             JsonEscape(displayName).c_str(),
             remainingDays,
-            JsonEscape(policyExpiresAt).c_str(),
+            JsonEscape(policyExpiresAtSaoPaulo).c_str(),
             JsonEscape(deviceFingerprint).c_str()
     );
     std::string remoteFeaturesFailure;
