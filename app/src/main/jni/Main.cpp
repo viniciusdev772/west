@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string>
 #include <ctime>
+#include <vector>
 #include <android/log.h>
 #include <dlfcn.h>
 #include "Includes/Logger.h"
@@ -14,6 +16,7 @@
 #include "Includes/Utils.h"
 #include "KittyMemory/MemoryPatch.h"
 #include "DialogOnLoad.h"
+#include "RemoteFeatures.h"
 #include "Menu/Setup.h"
 
 // Define o nome da biblioteca alvo
@@ -2736,110 +2739,34 @@ jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
 
     ShowQueuedLibLoadDialog(env, context);
 
+    if (IsDialogLoginValidated()) {
+        std::string remoteFeaturesFailure;
+        if (!SyncRemoteFeatures(env, GetBackendBaseUrl(), GetModSessionToken(), &remoteFeaturesFailure)) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_REMOTE_FEATURES",
+                                "Falha ao buscar menu remoto em GetFeatureList: %s",
+                                remoteFeaturesFailure.empty() ? "<desconhecida>"
+                                                              : remoteFeaturesFailure.c_str());
+        } else {
+            __android_log_print(ANDROID_LOG_INFO, "MOD_REMOTE_FEATURES",
+                                "Menu remoto sincronizado ao abrir o menu");
+        }
+    }
+
     const char *features[] = {
-            OBFUSCATE("Category_Menu de Modificações"),
-            OBFUSCATE("Collapse_Player e Recursos"),
-            OBFUSCATE("CollapseAdd_Category_Player e Recursos"),
-            OBFUSCATE("CollapseAdd_4_Toggle_Vida Infinita (15/02/2026)"),
-            OBFUSCATE("CollapseAdd_1_SeekBar_Dano de bala (15/02/2026)_1_999"),
-            OBFUSCATE("CollapseAdd_2_InputValue_Adicionar Moedas (15/02/2026)"),
-            OBFUSCATE("CollapseAdd_3_InputValue_Adicionar Gems (15/02/2026)"),
-            OBFUSCATE("CollapseAdd_5_SeekBar_Balas das Armas (15/02/2026)_1_999999"),
-
-            OBFUSCATE("Collapse_Itens"),
-            OBFUSCATE("CollapseAdd_Category_Itens"),
-            OBFUSCATE("CollapseAdd_12_Button_Adicionar Todas as Partes de Armas (15/02/2026)"),
-            OBFUSCATE("CollapseAdd_13_Button_Adicionar Todas as Peles (15/02/2026)"),
-            OBFUSCATE("CollapseAdd_14_Button_Adicionar 10 Whisky (15/02/2026)"),
-
-            OBFUSCATE("Collapse_Combate"),
-            OBFUSCATE("CollapseAdd_Category_Combate"),
-            OBFUSCATE("CollapseAdd_35_Toggle_AimBot Agressivo (15/02/2026)"),
-            OBFUSCATE("CollapseAdd_22_Toggle_Sempre Headshot (15/02/2026)"),
-            OBFUSCATE("CollapseAdd_43_Toggle_Auto Kill Seguro (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_44_Button_Kill All Agora (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_86_Toggle_Matar Proximos ao Trocar de Arma"),
-            OBFUSCATE("CollapseAdd_87_SeekBar_Raio do Kill na Troca_1_30"),
-
-            OBFUSCATE("Collapse_ESP Canvas"),
-            OBFUSCATE("CollapseAdd_Category_ESP Canvas"),
-            OBFUSCATE("CollapseAdd_75_Toggle_ESP Canvas (Overlay Java)"),
-            OBFUSCATE("CollapseAdd_64_SeekBar_ESP Vermelho_0_255"),
-            OBFUSCATE("CollapseAdd_65_SeekBar_ESP Verde_0_255"),
-            OBFUSCATE("CollapseAdd_66_SeekBar_ESP Azul_0_255"),
-            OBFUSCATE("CollapseAdd_67_SeekBar_ESP Espessura Box_1_8"),
-            OBFUSCATE("CollapseAdd_68_SeekBar_ESP Espessura Linha_1_8"),
-            OBFUSCATE("CollapseAdd_69_SeekBar_ESP Tamanho Texto_8_32"),
-            OBFUSCATE("CollapseAdd_80_Toggle_ESP Box"),
-            OBFUSCATE("CollapseAdd_70_Toggle_ESP Snapline"),
-            OBFUSCATE("CollapseAdd_71_Toggle_ESP Label"),
-            OBFUSCATE("CollapseAdd_79_Toggle_ESP Skeleton"),
-            OBFUSCATE("CollapseAdd_76_Toggle_ESP 360 Off-screen"),
-            OBFUSCATE("CollapseAdd_77_Toggle_Label do ESP 360"),
-            OBFUSCATE("CollapseAdd_78_Toggle_Contador do ESP 360"),
-            OBFUSCATE("CollapseAdd_72_Spinner_ESP Origem Linha_Topo,Centro,Base"),
-            OBFUSCATE("CollapseAdd_73_SeekBar_ESP Offset X (Centro=200)_0_400"),
-            OBFUSCATE("CollapseAdd_74_SeekBar_ESP Offset Y_0_400"),
-
-            OBFUSCATE("Collapse_ESP Nativa"),
-            OBFUSCATE("CollapseAdd_Category_ESP Nativa"),
-            OBFUSCATE("CollapseAdd_40_Toggle_ESP Completo (Barras de Vida) (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_41_Button_Atualizar ESP Agora (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_47_Toggle_ESP Inimigos no Minimapa (08/03/2026)"),
-
-            OBFUSCATE("Collapse_Visual e UI"),
-            OBFUSCATE("CollapseAdd_Category_Visual e UI"),
-            OBFUSCATE("CollapseAdd_36_Button_Criar Mission Hints Visuais (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_37_Button_Remover Mission Hints Visuais (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_38_Button_Mostrar Marcador no Alvo Atual (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_39_Button_Ocultar Marcador do Alvo (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_45_Toggle_Trilhas de Tiro em Todos os Alvos (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_46_Button_Limpar Trilhas de Tiro (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_48_Button_Mostrar Texto de Teste (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_49_InputText_Mostrar Texto Custom (08/03/2026)"),
-
-            OBFUSCATE("Collapse_Movimento"),
-            OBFUSCATE("CollapseAdd_Category_Movimento"),
-            OBFUSCATE("CollapseAdd_32_Toggle_Modo Voo (Experimental) (15/02/2026)"),
-            OBFUSCATE("CollapseAdd_33_SeekBar_Velocidade Vertical_1_20"),
-            OBFUSCATE("CollapseAdd_34_SeekBar_Ganho de Altura_1_50"),
-            OBFUSCATE("CollapseAdd_50_Toggle_NPCs Voadores (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_51_SeekBar_Forca do Hover NPC_1_30"),
-            OBFUSCATE("CollapseAdd_81_SeekBar_Altura do Hover NPC_1_40"),
-            OBFUSCATE("CollapseAdd_82_SeekBar_Drift Horizontal NPC_1_30"),
-            OBFUSCATE("CollapseAdd_83_SeekBar_Suavidade do Hover NPC_1_20"),
-            OBFUSCATE("CollapseAdd_84_Toggle_Oscilacao do Hover NPC"),
-            OBFUSCATE("CollapseAdd_85_SeekBar_Amplitude da Oscilacao NPC_1_20"),
-
-            OBFUSCATE("Collapse_Policia"),
-            OBFUSCATE("CollapseAdd_Category_Policia"),
-            OBFUSCATE("CollapseAdd_58_Button_Matar Somente Policiais (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_59_Toggle_Auto Limpar Policiais (08/03/2026)"),
-
-            OBFUSCATE("Collapse_Teleport"),
-            OBFUSCATE("CollapseAdd_Category_Teleport"),
-            OBFUSCATE("CollapseAdd_60_Button_Teleportar Para Alvo Atual (10/03/2026)"),
-            OBFUSCATE("CollapseAdd_61_Button_Teleportar Para Hostil Mais Proximo (10/03/2026)"),
-            OBFUSCATE("CollapseAdd_62_Button_Teleportar Para NPC de Missao (10/03/2026)"),
-            OBFUSCATE("CollapseAdd_63_Button_Teleportar Para NPC do Mapa (10/03/2026)"),
-
-            OBFUSCATE("Collapse_Chaos"),
-            OBFUSCATE("CollapseAdd_Category_Chaos"),
-            OBFUSCATE("CollapseAdd_52_Button_Chaos Time (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_53_Button_Chaos Spawn (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_54_Button_Chaos UI (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_55_Button_Chaos Weapon (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_56_Toggle_NPC War Entre Hostis (08/03/2026)"),
-            OBFUSCATE("CollapseAdd_57_Button_Chaos FX (08/03/2026)"),
+            OBFUSCATE("Category_Menu Remoto"),
+            OBFUSCATE("Collapse_Status"),
+            OBFUSCATE("CollapseAdd_Category_Status"),
+            OBFUSCATE("CollapseAdd_40_Toggle_Aguardando sincronizacao remota"),
     };
 
     int Total_Feature = (sizeof features / sizeof features[0]);
+    const std::vector<std::string> visibleFeatures = BuildVisibleFeatureList(features, Total_Feature);
     ret = (jobjectArray)
-            env->NewObjectArray(Total_Feature, env->FindClass(OBFUSCATE("java/lang/String")),
+            env->NewObjectArray(static_cast<jsize>(visibleFeatures.size()), env->FindClass(OBFUSCATE("java/lang/String")),
                                 env->NewStringUTF(""));
 
-    for (int i = 0; i < Total_Feature; i++)
-        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
+    for (jsize i = 0; i < static_cast<jsize>(visibleFeatures.size()); i++)
+        env->SetObjectArrayElement(ret, i, env->NewStringUTF(visibleFeatures[i].c_str()));
 
     return (ret);
 }
@@ -2861,6 +2788,12 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
     LOGD(OBFUSCATE("Recurso: %d - %s | Valor: = %d | Bool: = %d | Texto: = %s"), featNum,
          env->GetStringUTFChars(featName, 0), value,
          boolean, str != NULL ? env->GetStringUTFChars(str, 0) : "");
+
+    if (!IsFeatureAllowedByRemoteState(featNum)) {
+        __android_log_print(ANDROID_LOG_WARN, "MOD_REMOTE_FEATURES",
+                            "Mudanca ignorada para recurso bloqueado remotamente: %d", featNum);
+        return;
+    }
 
     switch (featNum) {
         case 1: // Dano de bala

@@ -23,6 +23,7 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH) \
 # Here you add the cpp file to compile
 LOCAL_SRC_FILES := Main.cpp \
     DialogOnLoad.cpp \
+    RemoteFeatures.cpp \
 	Substrate/hde64.c \
 	Substrate/SubstrateDebug.cpp \
 	Substrate/SubstrateHook.cpp \

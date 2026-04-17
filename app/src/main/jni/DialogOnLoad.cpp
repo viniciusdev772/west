@@ -16,6 +16,7 @@
 #include <curl/curl.h>
 
 #include "Includes/obfuscate.h"
+#include "RemoteFeatures.h"
 
 void Toast(JNIEnv *env, jobject thiz, const char *text, int length);
 
@@ -280,6 +281,77 @@ bool HttpPostJson(JNIEnv* env, const std::string& urlText, const std::string& bo
 
     __android_log_print(ANDROID_LOG_INFO, "MOD_DIALOG",
                         "curl POST ok url=%s status=%d response=%s",
+                        urlText.c_str(), *statusCode,
+                        responseText->empty() ? "<empty>" : responseText->c_str());
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    curl_global_cleanup();
+    return true;
+}
+
+bool HttpGetJsonAuthorized(JNIEnv* env, const std::string& urlText, const std::string& bearerToken,
+                           int* statusCode, std::string* responseText) {
+    if (!env || !statusCode || !responseText || bearerToken.empty()) return false;
+
+    *statusCode = 0;
+    responseText->clear();
+    CURLcode globalInitResult = curl_global_init(CURL_GLOBAL_DEFAULT);
+    if (globalInitResult != CURLE_OK) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_DIALOG", "curl_global_init failed: %s",
+                            curl_easy_strerror(globalInitResult));
+        return false;
+    }
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        curl_global_cleanup();
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_DIALOG", "curl_easy_init failed");
+        return false;
+    }
+
+    std::string authHeader = "Authorization: Bearer " + bearerToken;
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Accept: application/json");
+    headers = curl_slist_append(headers, authHeader.c_str());
+
+    curl_easy_setopt(curl, CURLOPT_URL, urlText.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, responseText);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(kHttpConnectTimeoutMs));
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(kHttpReadTimeoutMs));
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "VinaoModsNative/1.0");
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+
+    char errorBuffer[CURL_ERROR_SIZE] = {0};
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errorBuffer);
+
+    __android_log_print(ANDROID_LOG_INFO, "MOD_DIALOG",
+                        "curl GET start url=%s", urlText.c_str());
+
+    const CURLcode performResult = curl_easy_perform(curl);
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    *statusCode = static_cast<int>(httpCode);
+
+    if (performResult != CURLE_OK) {
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_DIALOG",
+                            "curl GET failed url=%s code=%d err=%s detail=%s",
+                            urlText.c_str(), static_cast<int>(performResult), curl_easy_strerror(performResult),
+                            errorBuffer[0] ? errorBuffer : "n/a");
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        curl_global_cleanup();
+        return false;
+    }
+
+    __android_log_print(ANDROID_LOG_INFO, "MOD_DIALOG",
+                        "curl GET ok url=%s status=%d response=%s",
                         urlText.c_str(), *statusCode,
                         responseText->empty() ? "<empty>" : responseText->c_str());
 
@@ -719,25 +791,6 @@ std::string BuildSuspiciousPropsJson() {
     return json;
 }
 
-std::string MapBackendLoginError(const std::string& errorCode) {
-    if (errorCode == "invalid_credentials") return "Usuario ou senha invalidos.";
-    if (errorCode == "unauthorized") return "Usuario ou senha invalidos.";
-    if (errorCode == "device_verification_required") return "Servidor indisponivel no momento. Tente novamente.";
-    if (errorCode == "account_blocked") return "Conta bloqueada. Fale com o suporte.";
-    if (errorCode == "license_inactive") return "Sua licenca nao esta ativa.";
-    if (errorCode == "device_limit_reached") return "Limite de dispositivos atingido.";
-    if (errorCode == "integrity_policy_denied") return "Ambiente inseguro detectado. Feche depuradores e tente novamente.";
-    if (errorCode == "rate_limited") return "Muitas tentativas. Aguarde um pouco e tente novamente.";
-    if (errorCode == "server_error") return "Servidor indisponivel no momento. Tente novamente.";
-    if (errorCode == "challenge_not_found" || errorCode == "challenge_already_used" ||
-        errorCode == "challenge_nonce_mismatch" || errorCode == "challenge_expired" ||
-        errorCode == "challenge_ip_mismatch") {
-        return "Falha ao iniciar a sessao segura. Tente novamente.";
-    }
-    if (errorCode == "integrity_request_hash_mismatch") return "Integridade da requisicao invalida.";
-    return "Falha na autenticacao do mod.";
-}
-
 std::string BuildModLoginPayload(JNIEnv* env, jobject context, const std::string& email,
                                  const std::string& password, const std::string& challengeId,
                                  const std::string& challengeNonce) {
@@ -846,18 +899,15 @@ bool PerformBackendLogin(JNIEnv* env, jobject context, const std::string& email,
     }
 
     if (loginStatus < 200 || loginStatus >= 300) {
-        const std::string errorCode = ExtractJsonString(loginResponse, "error");
         if (failureReason) {
-            if (!errorCode.empty()) {
-                *failureReason = MapBackendLoginError(errorCode);
-            } else if (loginStatus == 401) {
-                *failureReason = "Usuario ou senha invalidos.";
-            } else if (loginStatus == 403) {
-                *failureReason = "Acesso ao mod negado por politica da conta ou do dispositivo.";
-            } else if (loginStatus >= 500) {
-                *failureReason = "Servidor indisponivel no momento. Tente novamente.";
+            const std::string backendMessage = ExtractJsonString(loginResponse, "message");
+            const std::string backendError = ExtractJsonString(loginResponse, "error");
+            if (!backendMessage.empty()) {
+                *failureReason = backendMessage;
+            } else if (!backendError.empty()) {
+                *failureReason = backendError;
             } else {
-                *failureReason = "Falha na autenticacao do mod.";
+                *failureReason = loginResponse.empty() ? "Falha na autenticacao do mod." : loginResponse;
             }
         }
         return false;
@@ -891,6 +941,13 @@ bool PerformBackendLogin(JNIEnv* env, jobject context, const std::string& email,
             JsonEscape(policyExpiresAt).c_str(),
             JsonEscape(deviceFingerprint).c_str()
     );
+    std::string remoteFeaturesFailure;
+    if (!SyncRemoteFeatures(env, kBackendBaseUrl, g_modSessionToken, &remoteFeaturesFailure)) {
+        __android_log_print(ANDROID_LOG_WARN, "MOD_REMOTE_FEATURES",
+                            "Falha ao atualizar recursos remotos: %s",
+                            remoteFeaturesFailure.empty() ? "<desconhecida>"
+                                                          : remoteFeaturesFailure.c_str());
+    }
     QueueLoginSuccessHints(displayName.c_str(), remainingDays);
     return true;
 }
@@ -1138,6 +1195,7 @@ void RecoverLoginState(JNIEnv* env, const char* reason) {
     g_dialogShown = false;
     g_warningPending = false;
     g_modSessionToken[0] = '\0';
+    ResetRemoteFeatures();
     g_modDeviceFingerprint[0] = '\0';
     g_loginDisplayName[0] = '\0';
     g_loginPolicyExpiresAt[0] = '\0';
@@ -1732,6 +1790,42 @@ bool IsDialogLoginValidated() {
     return g_loginValidated && g_validatedGeneration != 0 && g_validatedGeneration == g_loginGeneration;
 }
 
+const char* GetModSessionToken() {
+    return g_modSessionToken;
+}
+
+const char* GetBackendBaseUrl() {
+    return kBackendBaseUrl;
+}
+
+bool SyncRemoteFeatures(JNIEnv* env, const char* baseUrl, const char* sessionToken,
+                        std::string* failureReason) {
+    if (failureReason) failureReason->clear();
+    if (!baseUrl || !*baseUrl || !sessionToken || !*sessionToken) {
+        if (failureReason) *failureReason = "Sessao do mod invalida para carregar recursos.";
+        return false;
+    }
+
+    const std::string url = std::string(baseUrl) + "/api/mod/features";
+    int statusCode = 0;
+    std::string responseText;
+    if (!HttpGetJsonAuthorized(env, url, sessionToken, &statusCode, &responseText)) {
+        if (failureReason) *failureReason = "Falha de rede ao carregar recursos remotos.";
+        return false;
+    }
+
+    if (statusCode < 200 || statusCode >= 300) {
+        const std::string backendMessage = ExtractJsonString(responseText, "message");
+        if (failureReason) {
+            *failureReason = backendMessage.empty() ? "Falha ao carregar recursos remotos."
+                                                    : backendMessage;
+        }
+        return false;
+    }
+
+    return StoreRemoteFeaturesResponse(responseText, failureReason);
+}
+
 void RegisterDialogContext(JNIEnv* env, jobject context) {
     if (!env || !context) return;
 
@@ -1753,6 +1847,7 @@ void QueueLibLoadDialog(const char* title, const char* message) {
     g_validatedGeneration = 0;
     g_toastPending = false;
     g_modSessionToken[0] = '\0';
+    ResetRemoteFeatures();
     g_modDeviceFingerprint[0] = '\0';
     g_loginDisplayName[0] = '\0';
     g_loginPolicyExpiresAt[0] = '\0';
