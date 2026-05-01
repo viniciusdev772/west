@@ -1,11 +1,31 @@
 {
   "permissions": {
     "allow": [
-      "Bash(ls:*)",
-      "Bash(find:*)",
-      "Bash(chmod:*)",
-      "Bash(rm:*)"
-    ],
-    "deny": []
+      "Bash(sort -t: -k3 -n)",
+      "WebSearch",
+      "WebFetch(domain:www.maartenhus.nl)",
+      "WebFetch(domain:www.freecodecamp.org)",
+      "WebFetch(domain:martinmcbride.org)",
+      "WebFetch(domain:www.kirupa.com)",
+      "WebFetch(domain:www.intmath.com)",
+      "WebFetch(domain:graphicmaths.com)",
+      "mcp__plugin_context7_context7__resolve-library-id",
+      "mcp__plugin_context7_context7__query-docs",
+      "Bash(npx vitest *)",
+      "Bash(node -e ' *)",
+      "Bash(node *)",
+      "Bash(pip3 --version)",
+      "Bash(pip3 install *)",
+      "Bash(python3 -c ' *)",
+      "Bash(QT_QPA_PLATFORM=offscreen timeout 8 python3 dashboard.py)",
+      "Bash(python3 -c 'import ast; ast.parse\\(open\\('\\\\''__TRACKED_VAR__'\\\\''\\).read\\(\\)\\)')",
+      "Bash(QT_QPA_PLATFORM=offscreen timeout 6 python3 dashboard.py)",
+      "Read(//root/.vinaomods_dashboard/**)",
+      "Bash(sqlite3 ~/.vinaomods_dashboard/audit.db \"SELECT id, ts, actor, tab, action, target FROM audit_log ORDER BY id DESC LIMIT 5;\")",
+      "Bash(python3 *)",
+      "Bash(QT_QPA_PLATFORM=offscreen timeout 10 python3 dashboard.py)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:openai.github.io)"
+    ]
   }
 }

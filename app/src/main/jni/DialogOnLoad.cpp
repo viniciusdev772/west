@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <cerrno>
 #include <fstream>
 #include <pthread.h>
 #include <sstream>
@@ -14,6 +15,7 @@
 #include <sys/system_properties.h>
 #include <unistd.h>
 #include <curl/curl.h>
+#include <media/NdkMediaDrm.h>
 
 #include "Includes/obfuscate.h"
 #include "RemoteFeatures.h"
@@ -831,6 +833,349 @@ std::string BuildSuspiciousPropsJson() {
     return json;
 }
 
+// ========== Hardened device fingerprint helpers ==========
+
+std::string TrimCopy(const std::string& in) {
+    size_t a = 0;
+    size_t b = in.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(in[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(in[b - 1]))) --b;
+    return in.substr(a, b - a);
+}
+
+std::string ReadAllText(const char* path, size_t maxBytes) {
+    std::ifstream f(path);
+    if (!f.is_open()) return "";
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    std::string s = ss.str();
+    if (s.size() > maxBytes) s.resize(maxBytes);
+    return s;
+}
+
+std::string ReadSysProp(const char* key) {
+    char buf[PROP_VALUE_MAX] = {0};
+    if (__system_property_get(key, buf) <= 0) return "";
+    return std::string(buf);
+}
+
+std::string GetBootId() {
+    return TrimCopy(ReadAllText("/proc/sys/kernel/random/boot_id", 256));
+}
+
+std::string GetKernelVersion() {
+    return TrimCopy(ReadAllText("/proc/version", 1024));
+}
+
+std::string GetCpuHardware() {
+    std::ifstream f("/proc/cpuinfo");
+    if (!f.is_open()) return "";
+    std::string line;
+    std::string hardware;
+    std::string features;
+    while (std::getline(f, line)) {
+        if (hardware.empty() && line.rfind("Hardware", 0) == 0) {
+            const size_t sep = line.find(':');
+            if (sep != std::string::npos) hardware = TrimCopy(line.substr(sep + 1));
+        } else if (features.empty() && line.rfind("Features", 0) == 0) {
+            const size_t sep = line.find(':');
+            if (sep != std::string::npos) features = TrimCopy(line.substr(sep + 1));
+        }
+        if (!hardware.empty() && !features.empty()) break;
+    }
+    if (hardware.empty() && features.empty()) return "";
+    return hardware + "|" + features;
+}
+
+long long GetMemTotalKb() {
+    std::ifstream f("/proc/meminfo");
+    if (!f.is_open()) return -1;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("MemTotal:", 0) == 0) {
+            long long kb = -1;
+            std::sscanf(line.c_str(), "MemTotal: %lld kB", &kb);
+            return kb;
+        }
+    }
+    return -1;
+}
+
+int ReadSelinuxEnforce() {
+    std::ifstream f("/sys/fs/selinux/enforce");
+    if (!f.is_open()) return -1;
+    std::string s;
+    std::getline(f, s);
+    if (s.empty()) return -1;
+    return std::atoi(s.c_str());
+}
+
+bool DetectOverlayMount() {
+    std::ifstream f("/proc/self/mounts");
+    if (!f.is_open()) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.find("overlay") != std::string::npos) return true;
+    }
+    return false;
+}
+
+std::string BytesToHex(const uint8_t* data, size_t length) {
+    static const char* kHex = "0123456789ABCDEF";
+    std::string hex;
+    hex.reserve(length * 2);
+    for (size_t i = 0; i < length; ++i) {
+        hex.push_back(kHex[(data[i] >> 4) & 0xF]);
+        hex.push_back(kHex[data[i] & 0xF]);
+    }
+    return hex;
+}
+
+std::string GetWidevineDeviceUniqueId() {
+    static const uint8_t kWidevineUuid[16] = {
+        0xED, 0xEF, 0x8B, 0xA9, 0x79, 0xD6, 0x4A, 0xCE,
+        0xA3, 0xC8, 0x27, 0xDC, 0xD5, 0x1D, 0x21, 0xED
+    };
+    AMediaDrm* drm = AMediaDrm_createByUUID(kWidevineUuid);
+    if (!drm) return "";
+    AMediaDrmByteArray prop{};
+    std::string out;
+    if (AMediaDrm_getPropertyByteArray(drm, "deviceUniqueId", &prop) == AMEDIA_OK &&
+        prop.ptr && prop.length > 0) {
+        out = BytesToHex(prop.ptr, prop.length);
+    }
+    AMediaDrm_release(drm);
+    return out;
+}
+
+std::string SafeStaticString(JNIEnv* env, const char* className, const char* fieldName) {
+    if (!env) return "";
+    jclass clazz = env->FindClass(className);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    if (!clazz) return "";
+    jfieldID field = env->GetStaticFieldID(clazz, fieldName, OBFUSCATE("Ljava/lang/String;"));
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    if (!field) return "";
+    jstring v = static_cast<jstring>(env->GetStaticObjectField(clazz, field));
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    return JStringToStdString(env, v);
+}
+
+std::string Sha256OfBytes(JNIEnv* env, const jbyte* data, jsize length) {
+    if (!env || !data || length <= 0) return "";
+    jclass digestClass = env->FindClass(OBFUSCATE("java/security/MessageDigest"));
+    if (!digestClass) return "";
+    jmethodID getInstance = env->GetStaticMethodID(digestClass, OBFUSCATE("getInstance"),
+                                                   OBFUSCATE("(Ljava/lang/String;)Ljava/security/MessageDigest;"));
+    jmethodID digest = env->GetMethodID(digestClass, OBFUSCATE("digest"), OBFUSCATE("([B)[B"));
+    if (!getInstance || !digest) return "";
+    jstring algo = env->NewStringUTF("SHA-256");
+    jobject inst = env->CallStaticObjectMethod(digestClass, getInstance, algo);
+    if (!inst) return "";
+    jbyteArray input = env->NewByteArray(length);
+    env->SetByteArrayRegion(input, 0, length, data);
+    jbyteArray out = static_cast<jbyteArray>(env->CallObjectMethod(inst, digest, input));
+    if (!out || env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    const jsize outLen = env->GetArrayLength(out);
+    jbyte* raw = env->GetByteArrayElements(out, nullptr);
+    std::string hex = BytesToHex(reinterpret_cast<const uint8_t*>(raw), static_cast<size_t>(outLen));
+    env->ReleaseByteArrayElements(out, raw, JNI_ABORT);
+    return hex;
+}
+
+std::string Sha256OfFile(JNIEnv* env, const std::string& path) {
+    if (!env || path.empty()) return "";
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return "";
+    jclass digestClass = env->FindClass(OBFUSCATE("java/security/MessageDigest"));
+    if (!digestClass) return "";
+    jmethodID getInstance = env->GetStaticMethodID(digestClass, OBFUSCATE("getInstance"),
+                                                   OBFUSCATE("(Ljava/lang/String;)Ljava/security/MessageDigest;"));
+    jmethodID update = env->GetMethodID(digestClass, OBFUSCATE("update"), OBFUSCATE("([BII)V"));
+    jmethodID doFinal = env->GetMethodID(digestClass, OBFUSCATE("digest"), OBFUSCATE("()[B"));
+    if (!getInstance || !update || !doFinal) return "";
+    jstring algo = env->NewStringUTF("SHA-256");
+    jobject inst = env->CallStaticObjectMethod(digestClass, getInstance, algo);
+    if (!inst) return "";
+    constexpr size_t kChunk = 65536;
+    std::string buf;
+    buf.resize(kChunk);
+    jbyteArray jbuf = env->NewByteArray(static_cast<jsize>(kChunk));
+    while (true) {
+        f.read(buf.data(), static_cast<std::streamsize>(kChunk));
+        const std::streamsize got = f.gcount();
+        if (got <= 0) break;
+        env->SetByteArrayRegion(jbuf, 0, static_cast<jsize>(got),
+                                reinterpret_cast<const jbyte*>(buf.data()));
+        env->CallVoidMethod(inst, update, jbuf, 0, static_cast<jint>(got));
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            env->DeleteLocalRef(jbuf);
+            return "";
+        }
+        if (f.eof()) break;
+    }
+    env->DeleteLocalRef(jbuf);
+    jbyteArray out = static_cast<jbyteArray>(env->CallObjectMethod(inst, doFinal));
+    if (!out || env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    const jsize outLen = env->GetArrayLength(out);
+    jbyte* raw = env->GetByteArrayElements(out, nullptr);
+    std::string hex = BytesToHex(reinterpret_cast<const uint8_t*>(raw), static_cast<size_t>(outLen));
+    env->ReleaseByteArrayElements(out, raw, JNI_ABORT);
+    return hex;
+}
+
+std::string FindLoadedLibPath(const char* libName) {
+    std::ifstream maps("/proc/self/maps");
+    if (!maps.is_open()) return "";
+    std::string line;
+    while (std::getline(maps, line)) {
+        if (line.find(libName) == std::string::npos) continue;
+        const size_t pathStart = line.find('/');
+        if (pathStart == std::string::npos) continue;
+        return line.substr(pathStart);
+    }
+    return "";
+}
+
+std::string GetApkSourceDir(JNIEnv* env, jobject context) {
+    if (!env || !context) return "";
+    jclass ctxClass = env->GetObjectClass(context);
+    jmethodID getApplicationInfo = ctxClass
+                                   ? env->GetMethodID(ctxClass, OBFUSCATE("getApplicationInfo"),
+                                                      OBFUSCATE("()Landroid/content/pm/ApplicationInfo;"))
+                                   : nullptr;
+    if (!getApplicationInfo) return "";
+    jobject appInfo = env->CallObjectMethod(context, getApplicationInfo);
+    if (!appInfo) return "";
+    jclass aiClass = env->GetObjectClass(appInfo);
+    jfieldID sourceDirField = aiClass
+                              ? env->GetFieldID(aiClass, OBFUSCATE("sourceDir"), OBFUSCATE("Ljava/lang/String;"))
+                              : nullptr;
+    if (!sourceDirField) return "";
+    jstring s = static_cast<jstring>(env->GetObjectField(appInfo, sourceDirField));
+    return JStringToStdString(env, s);
+}
+
+std::string GetGsfAndroidId(JNIEnv* env, jobject context) {
+    if (!env || !context) return "";
+    jclass ctxClass = env->GetObjectClass(context);
+    jmethodID getCR = ctxClass
+                      ? env->GetMethodID(ctxClass, OBFUSCATE("getContentResolver"),
+                                         OBFUSCATE("()Landroid/content/ContentResolver;"))
+                      : nullptr;
+    if (!getCR) return "";
+    jobject cr = env->CallObjectMethod(context, getCR);
+    if (!cr) return "";
+    jclass uriClass = env->FindClass(OBFUSCATE("android/net/Uri"));
+    if (!uriClass) return "";
+    jmethodID parseUri = env->GetStaticMethodID(uriClass, OBFUSCATE("parse"),
+                                                OBFUSCATE("(Ljava/lang/String;)Landroid/net/Uri;"));
+    if (!parseUri) return "";
+    jstring uriStr = env->NewStringUTF("content://com.google.android.gsf.gservices");
+    jobject uri = env->CallStaticObjectMethod(uriClass, parseUri, uriStr);
+    if (!uri || env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    jclass crClass = env->GetObjectClass(cr);
+    jmethodID query = env->GetMethodID(crClass, OBFUSCATE("query"),
+                                        OBFUSCATE("(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;"));
+    if (!query) return "";
+    jclass strClass = env->FindClass(OBFUSCATE("java/lang/String"));
+    if (!strClass) return "";
+    jstring keyArg = env->NewStringUTF("android_id");
+    jobjectArray args = env->NewObjectArray(1, strClass, keyArg);
+    jobject cursor = env->CallObjectMethod(cr, query, uri, nullptr, nullptr, args, nullptr);
+    if (!cursor || env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    jclass cursorClass = env->GetObjectClass(cursor);
+    jmethodID moveToFirst = env->GetMethodID(cursorClass, OBFUSCATE("moveToFirst"), OBFUSCATE("()Z"));
+    jmethodID getColumnCount = env->GetMethodID(cursorClass, OBFUSCATE("getColumnCount"), OBFUSCATE("()I"));
+    jmethodID getString = env->GetMethodID(cursorClass, OBFUSCATE("getString"), OBFUSCATE("(I)Ljava/lang/String;"));
+    jmethodID closeMethod = env->GetMethodID(cursorClass, OBFUSCATE("close"), OBFUSCATE("()V"));
+    std::string out;
+    if (moveToFirst && env->CallBooleanMethod(cursor, moveToFirst) == JNI_TRUE) {
+        if (getColumnCount && getString) {
+            const jint cols = env->CallIntMethod(cursor, getColumnCount);
+            if (cols >= 2) {
+                jstring v = static_cast<jstring>(env->CallObjectMethod(cursor, getString, 1));
+                out = JStringToStdString(env, v);
+            }
+        }
+    }
+    if (closeMethod) env->CallVoidMethod(cursor, closeMethod);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    return out;
+}
+
+std::string GetSensorListSha256(JNIEnv* env, jobject context) {
+    if (!env || !context) return "";
+    jclass ctxClass = env->GetObjectClass(context);
+    jmethodID getSysSvc = ctxClass
+                          ? env->GetMethodID(ctxClass, OBFUSCATE("getSystemService"),
+                                             OBFUSCATE("(Ljava/lang/String;)Ljava/lang/Object;"))
+                          : nullptr;
+    if (!getSysSvc) return "";
+    jstring svc = env->NewStringUTF("sensor");
+    jobject sm = env->CallObjectMethod(context, getSysSvc, svc);
+    if (!sm) return "";
+    jclass smClass = env->GetObjectClass(sm);
+    jmethodID getSensorList = env->GetMethodID(smClass, OBFUSCATE("getSensorList"),
+                                               OBFUSCATE("(I)Ljava/util/List;"));
+    if (!getSensorList) return "";
+    jobject list = env->CallObjectMethod(sm, getSensorList, -1);
+    if (!list) return "";
+    jclass listClass = env->GetObjectClass(list);
+    jmethodID size = env->GetMethodID(listClass, OBFUSCATE("size"), OBFUSCATE("()I"));
+    jmethodID get = env->GetMethodID(listClass, OBFUSCATE("get"), OBFUSCATE("(I)Ljava/lang/Object;"));
+    if (!size || !get) return "";
+    const jint count = env->CallIntMethod(list, size);
+    jclass sensorClass = env->FindClass(OBFUSCATE("android/hardware/Sensor"));
+    if (!sensorClass) return "";
+    jmethodID getName = env->GetMethodID(sensorClass, OBFUSCATE("getName"),
+                                          OBFUSCATE("()Ljava/lang/String;"));
+    jmethodID getVendor = env->GetMethodID(sensorClass, OBFUSCATE("getVendor"),
+                                            OBFUSCATE("()Ljava/lang/String;"));
+    jmethodID getType = env->GetMethodID(sensorClass, OBFUSCATE("getType"), OBFUSCATE("()I"));
+    std::string concat;
+    concat.reserve(static_cast<size_t>(count) * 64);
+    for (jint i = 0; i < count; ++i) {
+        jobject sensor = env->CallObjectMethod(list, get, i);
+        if (!sensor) continue;
+        const std::string name = getName
+                                 ? JStringToStdString(env, static_cast<jstring>(env->CallObjectMethod(sensor, getName)))
+                                 : "";
+        const std::string vendor = getVendor
+                                   ? JStringToStdString(env, static_cast<jstring>(env->CallObjectMethod(sensor, getVendor)))
+                                   : "";
+        const int type = getType ? env->CallIntMethod(sensor, getType) : 0;
+        char tbuf[16];
+        std::snprintf(tbuf, sizeof(tbuf), "%d", type);
+        concat += name; concat += "|"; concat += vendor; concat += "|"; concat += tbuf; concat += ";";
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (concat.empty()) return "";
+    return Sha256OfBytes(env, reinterpret_cast<const jbyte*>(concat.data()),
+                         static_cast<jsize>(concat.size()));
+}
+
+int GetCameraCount(JNIEnv* env, jobject context) {
+    if (!env || !context) return -1;
+    jclass ctxClass = env->GetObjectClass(context);
+    jmethodID getSysSvc = ctxClass
+                          ? env->GetMethodID(ctxClass, OBFUSCATE("getSystemService"),
+                                             OBFUSCATE("(Ljava/lang/String;)Ljava/lang/Object;"))
+                          : nullptr;
+    if (!getSysSvc) return -1;
+    jstring svc = env->NewStringUTF("camera");
+    jobject cm = env->CallObjectMethod(context, getSysSvc, svc);
+    if (!cm || env->ExceptionCheck()) { env->ExceptionClear(); return -1; }
+    jclass cmClass = env->GetObjectClass(cm);
+    jmethodID getCameraIdList = env->GetMethodID(cmClass, OBFUSCATE("getCameraIdList"),
+                                                 OBFUSCATE("()[Ljava/lang/String;"));
+    if (!getCameraIdList) return -1;
+    jobjectArray ids = static_cast<jobjectArray>(env->CallObjectMethod(cm, getCameraIdList));
+    if (!ids || env->ExceptionCheck()) { env->ExceptionClear(); return -1; }
+    return env->GetArrayLength(ids);
+}
+
 std::string BuildModLoginPayload(JNIEnv* env, jobject context, const std::string& email,
                                  const std::string& password, const std::string& challengeId,
                                  const std::string& challengeNonce) {
@@ -866,6 +1211,36 @@ std::string BuildModLoginPayload(JNIEnv* env, jobject context, const std::string
     const bool tamperDetected = hooksDetected || ptraceDetected ||
                                 signingDigest.empty() || packageName.empty() || versionCode <= 0;
 
+    // ---- Hardened device fingerprint (hard-to-forge signals) ----
+    const std::string widevineDeviceId = GetWidevineDeviceUniqueId();
+    const std::string gsfAndroidId = GetGsfAndroidId(env, context);
+    const std::string bootId = GetBootId();
+    const std::string kernelVersion = GetKernelVersion();
+    const std::string cpuHardware = GetCpuHardware();
+    const long long memTotalKb = GetMemTotalKb();
+    const int selinuxEnforce = ReadSelinuxEnforce();
+    const bool overlayMount = DetectOverlayMount();
+    const std::string verifiedBootState = ReadSysProp("ro.boot.verifiedbootstate");
+    const std::string bootloaderLocked = ReadSysProp("ro.boot.flash.locked");
+    const std::string verityMode = ReadSysProp("ro.boot.veritymode");
+    const std::string buildHardware = SafeStaticString(env, OBFUSCATE("android/os/Build"),
+                                                       OBFUSCATE("HARDWARE"));
+    const std::string buildBoard = SafeStaticString(env, OBFUSCATE("android/os/Build"),
+                                                    OBFUSCATE("BOARD"));
+    const std::string buildBootloader = SafeStaticString(env, OBFUSCATE("android/os/Build"),
+                                                         OBFUSCATE("BOOTLOADER"));
+    const std::string buildSocModel = SafeStaticString(env, OBFUSCATE("android/os/Build"),
+                                                       OBFUSCATE("SOC_MODEL"));
+    const std::string buildSocManufacturer = SafeStaticString(env, OBFUSCATE("android/os/Build"),
+                                                              OBFUSCATE("SOC_MANUFACTURER"));
+    const std::string sensorListSha256 = GetSensorListSha256(env, context);
+    const int cameraCount = GetCameraCount(env, context);
+    const std::string libil2cppPath = FindLoadedLibPath("libil2cpp.so");
+    const std::string libil2cppSha256 = libil2cppPath.empty() ? std::string()
+                                                              : Sha256OfFile(env, libil2cppPath);
+    const std::string apkPath = GetApkSourceDir(env, context);
+    const std::string apkSha256 = apkPath.empty() ? std::string() : Sha256OfFile(env, apkPath);
+
     std::ostringstream json;
     json << "{"
          << "\"email\":\"" << JsonEscape(email) << "\","
@@ -898,6 +1273,28 @@ std::string BuildModLoginPayload(JNIEnv* env, jobject context, const std::string
          << "\"adbEnabled\":" << (adbEnabled ? "true" : "false") << ","
          << "\"devOptionsEnabled\":" << (devOptionsEnabled ? "true" : "false") << ","
          << "\"suspiciousProps\":" << suspiciousProps
+         << "},"
+         << "\"hardenedDevice\":{"
+         << "\"widevineDeviceId\":\"" << JsonEscape(widevineDeviceId) << "\","
+         << "\"gsfAndroidId\":\"" << JsonEscape(gsfAndroidId) << "\","
+         << "\"bootId\":\"" << JsonEscape(bootId) << "\","
+         << "\"kernelVersion\":\"" << JsonEscape(kernelVersion) << "\","
+         << "\"cpuHardware\":\"" << JsonEscape(cpuHardware) << "\","
+         << "\"memTotalKb\":" << memTotalKb << ","
+         << "\"selinuxEnforce\":" << selinuxEnforce << ","
+         << "\"overlayMount\":" << (overlayMount ? "true" : "false") << ","
+         << "\"verifiedBootState\":\"" << JsonEscape(verifiedBootState) << "\","
+         << "\"bootloaderLocked\":\"" << JsonEscape(bootloaderLocked) << "\","
+         << "\"verityMode\":\"" << JsonEscape(verityMode) << "\","
+         << "\"buildHardware\":\"" << JsonEscape(buildHardware) << "\","
+         << "\"buildBoard\":\"" << JsonEscape(buildBoard) << "\","
+         << "\"buildBootloader\":\"" << JsonEscape(buildBootloader) << "\","
+         << "\"buildSocModel\":\"" << JsonEscape(buildSocModel) << "\","
+         << "\"buildSocManufacturer\":\"" << JsonEscape(buildSocManufacturer) << "\","
+         << "\"sensorListSha256\":\"" << JsonEscape(sensorListSha256) << "\","
+         << "\"cameraCount\":" << cameraCount << ","
+         << "\"libil2cppSha256\":\"" << JsonEscape(libil2cppSha256) << "\","
+         << "\"apkSha256\":\"" << JsonEscape(apkSha256) << "\""
          << "}"
          << "}";
     return json.str();
@@ -1665,6 +2062,7 @@ void* LoginWatcherThread(void*) {
             ClearDialogRef(env);
             ClearLoginRefs(env);
             __android_log_print(ANDROID_LOG_INFO, "MOD_DIALOG", "Login do mod validado pelo backend");
+            StartLicenseWatchdog();
             break;
         }
 
@@ -1825,10 +2223,164 @@ void ShowLoginDialog(JNIEnv* env, jobject context) {
     g_loginDialog = env->NewGlobalRef(dialog);
     StartLoginWatcher(env);
 }
+
+// ========== License Watchdog ==========
+// Periodically re-verifies the session token with the backend to catch
+// remote license divergence (revocation, expiration, ban). Runs on its
+// own pthread; uses pthread_cond_timedwait for cancellable sleep.
+
+constexpr int kWatchdogIntervalSeconds = 180;   // 3 min between checks
+constexpr int kWatchdogFirstDelaySeconds = 45;  // 45 s after start
+
+pthread_t g_watchdogThread;
+bool g_watchdogRunning = false;
+bool g_watchdogStopRequested = false;
+pthread_mutex_t g_watchdogMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t g_watchdogCond = PTHREAD_COND_INITIALIZER;
+
+void WatchdogDetachOnExit(void* /*arg*/) {
+    if (g_dialogVm) g_dialogVm->DetachCurrentThread();
+}
+
+bool WatchdogCancellableSleep(int seconds) {
+    timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += seconds;
+
+    pthread_mutex_lock(&g_watchdogMutex);
+    int rc = 0;
+    while (!g_watchdogStopRequested && rc == 0) {
+        rc = pthread_cond_timedwait(&g_watchdogCond, &g_watchdogMutex, &ts);
+        if (rc == ETIMEDOUT) break;
+    }
+    bool stopped = g_watchdogStopRequested;
+    pthread_mutex_unlock(&g_watchdogMutex);
+    return !stopped;
+}
+
+void* LicenseWatchdogThread(void* /*arg*/) {
+    if (!g_dialogVm) {
+        pthread_mutex_lock(&g_watchdogMutex);
+        g_watchdogRunning = false;
+        pthread_mutex_unlock(&g_watchdogMutex);
+        return nullptr;
+    }
+
+    JNIEnv* env = nullptr;
+    if (g_dialogVm->AttachCurrentThreadAsDaemon(&env, nullptr) != JNI_OK || !env) {
+        pthread_mutex_lock(&g_watchdogMutex);
+        g_watchdogRunning = false;
+        pthread_mutex_unlock(&g_watchdogMutex);
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_AUTH", "Watchdog: AttachCurrentThread falhou");
+        return nullptr;
+    }
+
+    static pthread_key_t detachKey;
+    static bool detachKeyCreated = false;
+    if (!detachKeyCreated) {
+        pthread_key_create(&detachKey, WatchdogDetachOnExit);
+        detachKeyCreated = true;
+    }
+    pthread_setspecific(detachKey, env);
+
+    if (!WatchdogCancellableSleep(kWatchdogFirstDelaySeconds)) {
+        pthread_mutex_lock(&g_watchdogMutex);
+        g_watchdogRunning = false;
+        pthread_mutex_unlock(&g_watchdogMutex);
+        return nullptr;
+    }
+
+    while (true) {
+        // Snapshot session state without lock (writes are aligned word-sized
+        // assignments on ARM and the worst case is a stale read that 401s,
+        // which we then handle correctly below).
+        bool valid = g_loginValidated;
+        char tokenSnapshot[sizeof(g_modSessionToken)];
+        std::strncpy(tokenSnapshot, g_modSessionToken, sizeof(tokenSnapshot) - 1);
+        tokenSnapshot[sizeof(tokenSnapshot) - 1] = '\0';
+
+        if (valid && tokenSnapshot[0]) {
+            const std::string url = std::string(kBackendBaseUrl) + "/api/mod/session/verify";
+            int statusCode = 0;
+            std::string responseText;
+            bool ok = HttpGetJsonAuthorized(env, url, tokenSnapshot, &statusCode, &responseText);
+
+            if (env->ExceptionCheck()) env->ExceptionClear();
+
+            if (ok && statusCode >= 200 && statusCode < 300) {
+                __android_log_print(ANDROID_LOG_DEBUG, "MOD_AUTH",
+                                    "Watchdog: licenca valida (status=%d)", statusCode);
+            } else if (ok && (statusCode == 401 || statusCode == 403)) {
+                const std::string reason = ExtractJsonString(responseText, "error");
+                __android_log_print(ANDROID_LOG_WARN, "MOD_AUTH",
+                                    "Watchdog: LICENCA REVOGADA (status=%d, reason=%s)",
+                                    statusCode, reason.c_str());
+                g_loginValidated = false;
+                g_validatedGeneration = 0;
+                ++g_loginGeneration;
+                g_modSessionToken[0] = '\0';
+                ResetRemoteFeatures();
+                g_dialogPending = true;
+                g_dialogShown = false;
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "MOD_AUTH",
+                                    "Watchdog: erro temporario (ok=%d, status=%d) — manter sessao",
+                                    ok ? 1 : 0, statusCode);
+            }
+        }
+
+        if (!WatchdogCancellableSleep(kWatchdogIntervalSeconds)) break;
+    }
+
+    pthread_setspecific(detachKey, nullptr);
+    g_dialogVm->DetachCurrentThread();
+
+    pthread_mutex_lock(&g_watchdogMutex);
+    g_watchdogRunning = false;
+    pthread_mutex_unlock(&g_watchdogMutex);
+    __android_log_print(ANDROID_LOG_INFO, "MOD_AUTH", "Watchdog encerrado");
+    return nullptr;
+}
+
 } // namespace
 
 bool IsDialogLoginValidated() {
     return g_loginValidated && g_validatedGeneration != 0 && g_validatedGeneration == g_loginGeneration;
+}
+
+void StartLicenseWatchdog() {
+    pthread_mutex_lock(&g_watchdogMutex);
+    if (g_watchdogRunning) {
+        pthread_mutex_unlock(&g_watchdogMutex);
+        return;
+    }
+    g_watchdogStopRequested = false;
+    g_watchdogRunning = true;
+    pthread_mutex_unlock(&g_watchdogMutex);
+
+    pthread_t thread;
+    if (pthread_create(&thread, nullptr, LicenseWatchdogThread, nullptr) != 0) {
+        pthread_mutex_lock(&g_watchdogMutex);
+        g_watchdogRunning = false;
+        pthread_mutex_unlock(&g_watchdogMutex);
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_AUTH", "Falha pthread_create watchdog");
+        return;
+    }
+    pthread_detach(thread);
+    g_watchdogThread = thread;
+    __android_log_print(ANDROID_LOG_INFO, "MOD_AUTH",
+                        "Watchdog de licenca iniciado (intervalo=%ds)", kWatchdogIntervalSeconds);
+}
+
+void StopLicenseWatchdog() {
+    pthread_mutex_lock(&g_watchdogMutex);
+    if (!g_watchdogRunning) {
+        pthread_mutex_unlock(&g_watchdogMutex);
+        return;
+    }
+    g_watchdogStopRequested = true;
+    pthread_cond_broadcast(&g_watchdogCond);
+    pthread_mutex_unlock(&g_watchdogMutex);
 }
 
 const char* GetModSessionToken() {
@@ -1944,6 +2496,7 @@ const char* SubmitJavaLogin(JNIEnv* env, jobject context, const char* email, con
         g_validatedGeneration = g_loginGeneration;
         g_javaLoginError[0] = '\0';
         __android_log_print(ANDROID_LOG_INFO, "MOD_DIALOG", "Login Java validado com sucesso");
+        StartLicenseWatchdog();
         return nullptr;
     }
 

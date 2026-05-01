@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 #include <ctime>
+#include <chrono>
 #include <vector>
 #include <android/log.h>
 #include <dlfcn.h>
@@ -117,8 +118,13 @@ jmethodID gEspDrawLineMethod = nullptr;
 jmethodID gEspDrawRectMethod = nullptr;
 jmethodID gEspDrawTextMethod = nullptr;
 jmethodID gEspDrawCircleMethod = nullptr;
+jmethodID gEspDrawFilledCircleMethod = nullptr;
+jmethodID gEspDrawFilledRectMethod = nullptr;
 jmethodID gEspViewGetWidthMethod = nullptr;
 jmethodID gEspViewGetHeightMethod = nullptr;
+volatile bool introAnimPending = false;
+char gIntroUserName[64] = "ASSINANTE";
+volatile int gIntroRemainingDays = -1;
 
 // Ações pendentes para execução em contexto de jogo
 volatile bool pendingCreateMissionHints = false;
@@ -139,6 +145,18 @@ volatile bool pendingChaosUI = false;
 volatile bool pendingChaosWeapon = false;
 volatile bool pendingChaosFx = false;
 volatile bool pendingKillPoliceOnly = false;
+volatile bool pendingHidePolice = false;
+volatile bool pendingRecoverPolice = false;
+volatile bool pendingPoliceEscalation = false;
+volatile int pendingSetPoliceLevel = -1;
+volatile bool trueGodMode = false;
+volatile bool disableEnemyAttacks = false;
+volatile bool zeroEnemyAccuracy = false;
+volatile bool slowMotion = false;
+volatile bool freezeEnemies = false;
+volatile int pendingAllDamageUp = -1;
+volatile int pendingMoveSpeedUp = -1;
+volatile int pendingChangeHorse = -1;
 char pendingCustomWordsText[256] = {0};
 char pendingLoginSuccessHints[12][128] = {0};
 
@@ -428,6 +446,7 @@ typedef void (*GeneratePoliceFunc)(void* thisPtr, void* method);
 typedef Vector3 (*GetPoliceBurnPosFunc)(void* thisPtr, Vector3 playerPos, float minSqr, float maxSqr);
 typedef void (*HideNonNpcAndPoliceFunc)(void* thisPtr, void* method);
 typedef void (*RecoverNonNpcAndPoliceFunc)(void* thisPtr, void* method);
+typedef void (*PlayerAttackedNpcFunc)(void* thisPtr, Vector3 playerPos, void* method);
 typedef void* (*GetNpcSheriffInstanceFunc)(void* method);
 typedef void* (*GetNpcBountyHunterInstanceFunc)(void* method);
 typedef void* (*GetSceneInOutPosCtrlInstanceFunc)(void* method);
@@ -1122,7 +1141,7 @@ static bool TryBuildScreenBoxForPlayer(void* player, ScreenBox& outBox) {
 static bool EnsureEspJniMethods(JNIEnv* env, jobject espView) {
     if (!env || !espView) return false;
     if (gEspDrawLineMethod && gEspDrawRectMethod && gEspDrawTextMethod &&
-        gEspDrawCircleMethod &&
+        gEspDrawCircleMethod && gEspDrawFilledCircleMethod && gEspDrawFilledRectMethod &&
         gEspViewGetWidthMethod && gEspViewGetHeightMethod) {
         return true;
     }
@@ -1130,16 +1149,19 @@ static bool EnsureEspJniMethods(JNIEnv* env, jobject espView) {
     jclass espClass = env->GetObjectClass(espView);
     if (!espClass) return false;
 
-    gEspDrawLineMethod = env->GetMethodID(espClass, "drawLine", "(Landroid/graphics/Canvas;IIIIFFFFF)V");
-    gEspDrawRectMethod = env->GetMethodID(espClass, "drawRect", "(Landroid/graphics/Canvas;IIIIFFFFF)V");
-    gEspDrawTextMethod = env->GetMethodID(espClass, "drawText", "(Landroid/graphics/Canvas;IIIILjava/lang/String;FFF)V");
-    gEspDrawCircleMethod = env->GetMethodID(espClass, "drawCircle", "(Landroid/graphics/Canvas;IIIIFFFF)V");
-    gEspViewGetWidthMethod = env->GetMethodID(espClass, "getWidth", "()I");
-    gEspViewGetHeightMethod = env->GetMethodID(espClass, "getHeight", "()I");
+    gEspDrawLineMethod         = env->GetMethodID(espClass, "drawLine",         "(Landroid/graphics/Canvas;IIIIFFFFF)V");
+    gEspDrawRectMethod         = env->GetMethodID(espClass, "drawRect",         "(Landroid/graphics/Canvas;IIIIFFFFF)V");
+    gEspDrawTextMethod         = env->GetMethodID(espClass, "drawText",         "(Landroid/graphics/Canvas;IIIILjava/lang/String;FFF)V");
+    gEspDrawCircleMethod       = env->GetMethodID(espClass, "drawCircle",       "(Landroid/graphics/Canvas;IIIIFFFF)V");
+    gEspDrawFilledCircleMethod = env->GetMethodID(espClass, "drawFilledCircle", "(Landroid/graphics/Canvas;IIIIFFF)V");
+    gEspDrawFilledRectMethod   = env->GetMethodID(espClass, "drawFilledRect",   "(Landroid/graphics/Canvas;IIIIFFFF)V");
+    gEspViewGetWidthMethod     = env->GetMethodID(espClass, "getWidth",         "()I");
+    gEspViewGetHeightMethod    = env->GetMethodID(espClass, "getHeight",        "()I");
+    if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(espClass);
 
     return gEspDrawLineMethod && gEspDrawRectMethod && gEspDrawTextMethod &&
-           gEspDrawCircleMethod &&
+           gEspDrawCircleMethod && gEspDrawFilledCircleMethod && gEspDrawFilledRectMethod &&
            gEspViewGetWidthMethod && gEspViewGetHeightMethod;
 }
 
@@ -1176,6 +1198,16 @@ static void DrawEspText(JNIEnv* env, jobject espView, jobject canvas, int a, int
 static void DrawEspCircle(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, float stroke, float x, float y, float radius) {
     if (!EnsureEspJniMethods(env, espView)) return;
     env->CallVoidMethod(espView, gEspDrawCircleMethod, canvas, a, r, g, b, stroke, x, y, radius);
+}
+
+static void DrawEspFilledCircle(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, float x, float y, float radius) {
+    if (!EnsureEspJniMethods(env, espView)) return;
+    env->CallVoidMethod(espView, gEspDrawFilledCircleMethod, canvas, a, r, g, b, x, y, radius);
+}
+
+static void DrawEspFilledRect(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, float x, float y, float w, float h) {
+    if (!EnsureEspJniMethods(env, espView)) return;
+    env->CallVoidMethod(espView, gEspDrawFilledRectMethod, canvas, a, r, g, b, x, y, w, h);
 }
 
 static bool TryGetPlayerBoneScreen(void* player, uintptr_t boneOffset, Vector3& outScreen) {
@@ -1431,9 +1463,183 @@ static bool ProjectWorldToScreenRaw(const Vector3& worldPos, Vector3& outScreenP
     }
 }
 
+// ========== INTRO ANIMATION ==========
+
+static inline float ia_clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+static inline float ia_window(float t, float a, float b) { return b > a ? ia_clamp01((t - a) / (b - a)) : 0.0f; }
+static inline float ia_eio(float t) { t = ia_clamp01(t); return t * t * (3.0f - 2.0f * t); }
+static inline int   ia_alpha(float t, float s, float fi, float fo, float e, int mx = 255) {
+    return (int)(ia_eio(ia_window(t, s, fi)) * ia_eio(1.0f - ia_window(t, fo, e)) * mx);
+}
+
+static void DrawIntroAnimation(JNIEnv* env, jobject espView, jobject canvas) {
+    static bool active = false;
+    static std::chrono::steady_clock::time_point startTime;
+
+    if (introAnimPending) {
+        introAnimPending = false;
+        active = true;
+        startTime = std::chrono::steady_clock::now();
+    }
+    if (!active) return;
+    if (!EnsureEspJniMethods(env, espView)) return;
+
+    const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - startTime).count();
+    if (t > 6.5f) { active = false; return; }
+
+    const int W = env->CallIntMethod(espView, gEspViewGetWidthMethod);
+    const int H = env->CallIntMethod(espView, gEspViewGetHeightMethod);
+    if (W <= 0 || H <= 0) return;
+
+    const float cx = W * 0.5f;
+    const float cy = H * 0.5f;
+    const float pw = W * 0.72f; // panel width
+    const float ph = H * 0.38f; // panel height
+    const float arm = W * 0.08f; // bracket arm length
+
+    // ---- 1. Dark background panel (fade in 0→0.6, fade out 4.8→6.5) ----
+    {
+        int a = ia_alpha(t, 0.0f, 0.6f, 4.8f, 6.5f, 160);
+        if (a > 0) DrawEspFilledRect(env, espView, canvas, a, 5, 3, 2,
+                                     cx - pw * 0.5f, cy - ph * 0.5f, pw, ph);
+    }
+
+    // ---- 2. Gold border rect around panel ----
+    {
+        int a = ia_alpha(t, 0.2f, 0.9f, 4.6f, 6.5f, 220);
+        if (a > 0) DrawEspRect(env, espView, canvas, a, 255, 200, 50, 2.5f,
+                               cx - pw * 0.5f, cy - ph * 0.5f, pw, ph);
+    }
+
+    // ---- 3. Corner brackets sliding in (gold, thick) ----
+    // Each bracket = 2 lines forming L. Slide from corner toward panel edge.
+    {
+        int a = ia_alpha(t, 0.1f, 1.0f, 4.5f, 6.5f, 240);
+        if (a > 0) {
+            float slide = ia_eio(ia_window(t, 0.1f, 1.0f)) * 1.0f; // 0..1 progress
+            // Corner positions (target = panel corners ± offset)
+            float ox = W * 0.04f; // overshoot beyond panel edge
+            float oy = H * 0.04f;
+            float lx1 = cx - pw * 0.5f - ox + (W * 0.12f) * (1.0f - slide); // TL x start slides in
+            float ty1 = cy - ph * 0.5f - oy + (H * 0.10f) * (1.0f - slide);
+            float rx1 = cx + pw * 0.5f + ox - (W * 0.12f) * (1.0f - slide);
+            float by1 = cy + ph * 0.5f + oy - (H * 0.10f) * (1.0f - slide);
+
+            // TL bracket
+            DrawEspLine(env, espView, canvas, a, 255, 210, 60, 3.0f, lx1, ty1, lx1 + arm, ty1);
+            DrawEspLine(env, espView, canvas, a, 255, 210, 60, 3.0f, lx1, ty1, lx1, ty1 + arm);
+            // TR bracket
+            DrawEspLine(env, espView, canvas, a, 255, 210, 60, 3.0f, rx1, ty1, rx1 - arm, ty1);
+            DrawEspLine(env, espView, canvas, a, 255, 210, 60, 3.0f, rx1, ty1, rx1, ty1 + arm);
+            // BL bracket
+            DrawEspLine(env, espView, canvas, a, 255, 210, 60, 3.0f, lx1, by1, lx1 + arm, by1);
+            DrawEspLine(env, espView, canvas, a, 255, 210, 60, 3.0f, lx1, by1, lx1, by1 - arm);
+            // BR bracket
+            DrawEspLine(env, espView, canvas, a, 255, 210, 60, 3.0f, rx1, by1, rx1 - arm, by1);
+            DrawEspLine(env, espView, canvas, a, 255, 210, 60, 3.0f, rx1, by1, rx1, by1 - arm);
+        }
+    }
+
+    // ---- 4. Horizontal scan line sweeping down from panel top (cyan glow) ----
+    {
+        float prog = ia_window(t, 0.3f, 2.0f);
+        int a = (int)(ia_eio(ia_window(t, 0.3f, 0.8f)) * (1.0f - ia_eio(ia_window(t, 1.5f, 2.0f))) * 200);
+        if (a > 0) {
+            float sy = (cy - ph * 0.5f) + prog * ph;
+            DrawEspLine(env, espView, canvas, a, 120, 230, 255, 1.5f,
+                        cx - pw * 0.5f + 4, sy, cx + pw * 0.5f - 4, sy);
+        }
+    }
+
+    // ---- 5. Main title "WEST" (white with gold shadow) ----
+    {
+        int as = ia_alpha(t, 0.8f, 1.4f, 4.2f, 6.0f, 130); // shadow
+        int at = ia_alpha(t, 0.8f, 1.4f, 4.2f, 6.0f, 255); // text
+        float ts = H * 0.065f; // text size
+        if (as > 0) DrawEspText(env, espView, canvas, as, 180, 130, 10, "WEST",
+                                cx + 3.0f, cy - ts * 0.55f + 3.0f, ts);
+        if (at > 0) DrawEspText(env, espView, canvas, at, 255, 245, 200, "WEST",
+                                cx, cy - ts * 0.55f, ts);
+    }
+
+    // ---- 6a. Username (gold, medium) ----
+    {
+        int a = ia_alpha(t, 1.3f, 2.0f, 4.2f, 6.0f, 240);
+        float ts = H * 0.028f;
+        if (a > 0) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "BEM-VINDO, %s", gIntroUserName);
+            DrawEspText(env, espView, canvas, a, 255, 200, 60, buf,
+                        cx, cy + ts * 1.2f, ts);
+        }
+    }
+
+    // ---- 6b. Days remaining (cream, smaller, lower) ----
+    {
+        int a = ia_alpha(t, 1.6f, 2.3f, 4.2f, 6.0f, 220);
+        float ts = H * 0.022f;
+        if (a > 0) {
+            char buf[96];
+            int days = gIntroRemainingDays;
+            if (days >= 0) std::snprintf(buf, sizeof(buf), "EXPIRA EM %d DIAS", days);
+            else           std::snprintf(buf, sizeof(buf), "EXPIRA EM DATA INDISPONIVEL");
+            DrawEspText(env, espView, canvas, a, 255, 240, 180, buf,
+                        cx, cy + ts * 3.2f, ts);
+        }
+    }
+
+    // ---- 7. Star / gun-sight: 8 radiating lines from center ----
+    {
+        int a = ia_alpha(t, 1.8f, 2.5f, 4.0f, 6.0f, 180);
+        if (a > 0) {
+            float maxLen = std::min(pw, ph) * 0.42f;
+            float len = ia_eio(ia_window(t, 1.8f, 2.5f)) * maxLen;
+            for (int i = 0; i < 8; ++i) {
+                float angle = (float)i * (3.14159265f / 4.0f);
+                float ex = cx + std::cos(angle) * len;
+                float ey = cy + std::sin(angle) * len;
+                DrawEspLine(env, espView, canvas, a, 255, 215, 80, 1.8f, cx, cy, ex, ey);
+            }
+            // Small center dot
+            DrawEspFilledCircle(env, espView, canvas, a, 255, 220, 60, cx, cy, 5.0f);
+        }
+    }
+
+    // ---- 8. Concentric expanding circles (3 rings, staggered) ----
+    {
+        for (int ring = 0; ring < 3; ++ring) {
+            float delay = ring * 0.35f;
+            float ringT = t - 2.2f - delay;
+            if (ringT < 0.0f) continue;
+            float prog = ia_clamp01(ringT / 1.8f);
+            float radius = prog * std::min(pw, ph) * 0.52f;
+            int a = (int)((1.0f - prog) * ia_eio(ia_window(t, 2.2f + delay, 2.6f + delay)) * 200);
+            if (a > 0)
+                DrawEspCircle(env, espView, canvas, a, 255, 200, 60, 2.0f, cx, cy, radius);
+        }
+    }
+
+    // ---- 9. Two thin horizontal lines (panel top/bottom inner glow, gold) ----
+    {
+        int a = ia_alpha(t, 0.5f, 1.2f, 4.0f, 6.0f, 160);
+        if (a > 0) {
+            float inset = 6.0f;
+            DrawEspLine(env, espView, canvas, a, 255, 200, 50, 1.0f,
+                        cx - pw * 0.5f + inset, cy - ph * 0.5f + inset,
+                        cx + pw * 0.5f - inset, cy - ph * 0.5f + inset);
+            DrawEspLine(env, espView, canvas, a, 255, 200, 50, 1.0f,
+                        cx - pw * 0.5f + inset, cy + ph * 0.5f - inset,
+                        cx + pw * 0.5f - inset, cy + ph * 0.5f - inset);
+        }
+    }
+}
+
+// ========== FIM INTRO ANIMATION ==========
+
 void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
     if (!env || !espView || !canvas) return;
     if (!isLibraryLoaded(targetLibName) || !IsDialogLoginValidated()) return;
+    DrawIntroAnimation(env, espView, canvas);
     if (!espCanvas) return;
     if (!EnsureEspJniMethods(env, espView)) return;
 
@@ -2244,12 +2450,214 @@ void GeneratePolice(void* missionCtrl) {
         
         // Chama a função apenas se todas as verificações passaram
         generatePolice(missionCtrl, nullptr);
-        
+
     } catch (const std::exception& e) {
         // Exceção capturada - não faz nada
     } catch (...) {
         // Qualquer exceção - não faz nada
     }
+}
+
+// Lê CurPoliceLevel de MissionCtrl (0x58)
+int ReadPoliceLevel() {
+    try {
+        void* missionCtrl = GetMissionCtrlInstance();
+        if (!IsProbablyValidPtr(missionCtrl)) return -1;
+        return *reinterpret_cast<int*>(reinterpret_cast<char*>(missionCtrl) + 0x58);
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Escreve CurPoliceLevel em MissionCtrl (0x58)
+void SetPoliceLevel(int level) {
+    try {
+        void* missionCtrl = GetMissionCtrlInstance();
+        if (!IsProbablyValidPtr(missionCtrl)) return;
+        *reinterpret_cast<int*>(reinterpret_cast<char*>(missionCtrl) + 0x58) = level;
+        __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "CurPoliceLevel -> %d", level);
+    } catch (...) {}
+}
+
+// Obtém o número máximo de policiais via GetPoliceMaxNum() — RVA 0x53A5A0
+int GetPoliceMaxCount() {
+    try {
+        uintptr_t addr = getAbsoluteAddress(targetLibName, 0x53A5A0);
+        if (addr == 0) return -1;
+        auto fn = reinterpret_cast<GetPoliceMaxNumFunc>(addr);
+        return fn(nullptr);
+    } catch (...) {
+        return -1;
+    }
+}
+
+// Esconde todos os policiais — MissionCtrl.HideNonNpcAndPolice() RVA 0x278038
+void HideAllPolice() {
+    try {
+        void* missionCtrl = GetMissionCtrlInstance();
+        if (!IsProbablyValidPtr(missionCtrl)) return;
+        uintptr_t addr = getAbsoluteAddress(targetLibName, 0x278038);
+        if (addr == 0) return;
+        auto fn = reinterpret_cast<HideNonNpcAndPoliceFunc>(addr);
+        fn(missionCtrl, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "HideNonNpcAndPolice chamada");
+    } catch (...) {}
+}
+
+// Restaura policiais ocultos — MissionCtrl.RecoverNonNpcAndPolice() RVA 0x27B5DC
+void RecoverAllPolice() {
+    try {
+        void* missionCtrl = GetMissionCtrlInstance();
+        if (!IsProbablyValidPtr(missionCtrl)) return;
+        uintptr_t addr = getAbsoluteAddress(targetLibName, 0x27B5DC);
+        if (addr == 0) return;
+        auto fn = reinterpret_cast<RecoverNonNpcAndPoliceFunc>(addr);
+        fn(missionCtrl, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "RecoverNonNpcAndPolice chamada");
+    } catch (...) {}
+}
+
+// Simula ataque ao NPC para escalar nível policial — MissionCtrl.PlayerAttackedNpc(Vector3) RVA 0x281150
+void TriggerPoliceEscalation() {
+    try {
+        void* missionCtrl = GetMissionCtrlInstance();
+        if (!IsProbablyValidPtr(missionCtrl)) return;
+        void* myPlayer = GetMyPlayerInstance();
+        Vector3 playerPos = {0.0f, 0.0f, 0.0f};
+        if (IsProbablyValidPtr(myPlayer)) {
+            GetPlayerWorldPosition(myPlayer, playerPos);
+        }
+        uintptr_t addr = getAbsoluteAddress(targetLibName, 0x281150);
+        if (addr == 0) return;
+        auto fn = reinterpret_cast<PlayerAttackedNpcFunc>(addr);
+        fn(missionCtrl, playerPos, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "PlayerAttackedNpc disparado pos=(%.1f,%.1f,%.1f)", playerPos.x, playerPos.y, playerPos.z);
+    } catch (...) {}
+}
+
+// ========== NOVAS FUNÇÕES AVANÇADAS ==========
+
+// Escreve canHitPlayer=false em GameCtrl (offset 0x3B) — invencibilidade verdadeira
+void ApplyTrueGodMode() {
+    try {
+        void* gameCtrl = GetGameCtrlInstance();
+        if (!IsProbablyValidPtr(gameCtrl)) return;
+        *reinterpret_cast<bool*>(reinterpret_cast<char*>(gameCtrl) + 0x3B) = false;
+    } catch (...) {}
+}
+
+// AIdata.canAttack = false para todos os inimigos ativos (offsets: PlayerBase+0x14=PlayerBaseData, +0xC=AIdata, +0x31=canAttack)
+void ApplyDisableEnemyAttacks() {
+    try {
+        void* enemies[128] = {};
+        int count = CollectActiveEnemyBases(enemies, 128);
+        for (int i = 0; i < count; ++i) {
+            void* eb = enemies[i];
+            if (!IsProbablyValidPtr(eb)) continue;
+            void* bd = *reinterpret_cast<void**>(reinterpret_cast<char*>(eb) + 0x14);
+            if (!IsProbablyValidPtr(bd)) continue;
+            void* ai = *reinterpret_cast<void**>(reinterpret_cast<char*>(bd) + 0xC);
+            if (!IsProbablyValidPtr(ai)) continue;
+            *reinterpret_cast<bool*>(reinterpret_cast<char*>(ai) + 0x31) = false;
+        }
+    } catch (...) {}
+}
+
+// AIdata.HitRate = 0 para todos os inimigos ativos (offset 0x28)
+void ApplyZeroEnemyAccuracy() {
+    try {
+        void* enemies[128] = {};
+        int count = CollectActiveEnemyBases(enemies, 128);
+        for (int i = 0; i < count; ++i) {
+            void* eb = enemies[i];
+            if (!IsProbablyValidPtr(eb)) continue;
+            void* bd = *reinterpret_cast<void**>(reinterpret_cast<char*>(eb) + 0x14);
+            if (!IsProbablyValidPtr(bd)) continue;
+            void* ai = *reinterpret_cast<void**>(reinterpret_cast<char*>(bd) + 0xC);
+            if (!IsProbablyValidPtr(ai)) continue;
+            *reinterpret_cast<float*>(reinterpret_cast<char*>(ai) + 0x28) = 0.0f;
+        }
+    } catch (...) {}
+}
+
+// GameCtrl.SetTimeScale(0.3f) / RecoverTimeScale()
+void ApplySlowMotion(bool enable) {
+    try {
+        if (enable) {
+            uintptr_t addr = getAbsoluteAddress(targetLibName, 0x2EF174);
+            if (addr == 0) return;
+            auto fn = reinterpret_cast<GameCtrlSetTimeScaleFunc>(addr);
+            fn(0.3f, nullptr);
+        } else {
+            uintptr_t addr = getAbsoluteAddress(targetLibName, 0x2EEF48);
+            if (addr == 0) return;
+            auto fn = reinterpret_cast<GameCtrlRecoverTimeScaleFunc>(addr);
+            fn(nullptr);
+        }
+    } catch (...) {}
+}
+
+// EnemyFactory.DisableEnemy() / EnableEnemy() via gameCtrl+0x28
+void ApplyFreezeEnemies(bool enable) {
+    try {
+        void* gameCtrl = GetGameCtrlInstance();
+        if (!IsProbablyValidPtr(gameCtrl)) return;
+        void* factory = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x28);
+        if (!IsProbablyValidPtr(factory)) return;
+        typedef void (*FactoryFunc)(void*, void*);
+        uintptr_t addr = getAbsoluteAddress(targetLibName, enable ? 0x2E4BE4 : 0x2E4E78);
+        if (addr == 0) return;
+        reinterpret_cast<FactoryFunc>(addr)(factory, nullptr);
+    } catch (...) {}
+}
+
+// PropertyAdd: AllDamageUp (offset 0x28) e MoveSpeedUp (offset 0x20)
+// gameCtrl+0x10=MyCtrlPlayer, MyCtrlPlayer+0x14=MyCtrlPlayerData, +0x8=PropertyAdd
+void ApplyPropertyAdd(int allDamageUp, int moveSpeedUp) {
+    try {
+        void* gameCtrl = GetGameCtrlInstance();
+        if (!IsProbablyValidPtr(gameCtrl)) return;
+        void* ctrlPlayer = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x10);
+        if (!IsProbablyValidPtr(ctrlPlayer)) return;
+        void* ctrlData = *reinterpret_cast<void**>(reinterpret_cast<char*>(ctrlPlayer) + 0x14);
+        if (!IsProbablyValidPtr(ctrlData)) return;
+        void* propAdd = *reinterpret_cast<void**>(reinterpret_cast<char*>(ctrlData) + 0x8);
+        if (!IsProbablyValidPtr(propAdd)) return;
+        if (allDamageUp >= 0)
+            *reinterpret_cast<float*>(reinterpret_cast<char*>(propAdd) + 0x28) = (float)allDamageUp;
+        if (moveSpeedUp >= 0)
+            *reinterpret_cast<float*>(reinterpret_cast<char*>(propAdd) + 0x20) = (float)moveSpeedUp;
+    } catch (...) {}
+}
+
+// GameCtrl.ChangeHorse(int) RVA 0x2F2450
+void DoChangeHorse(int horseID) {
+    try {
+        void* gameCtrl = GetGameCtrlInstance();
+        if (!IsProbablyValidPtr(gameCtrl)) return;
+
+        // GameCtrl.isOnHorse at offset 0x38 — must be true or crash
+        bool isOnHorse = *reinterpret_cast<bool*>(reinterpret_cast<char*>(gameCtrl) + 0x38);
+        if (!isOnHorse) {
+            ShowWordsHintText("Monte em um cavalo antes de trocar!", 3.0f);
+            __android_log_print(ANDROID_LOG_WARN, "MOD_PLAYER", "ChangeHorse bloqueado: jogador nao esta em cavalo");
+            return;
+        }
+
+        // GameCtrl.myHorse at offset 0x18 — must be a valid Player*
+        void* myHorse = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x18);
+        if (!IsProbablyValidPtr(myHorse)) {
+            ShowWordsHintText("Monte em um cavalo antes de trocar!", 3.0f);
+            __android_log_print(ANDROID_LOG_WARN, "MOD_PLAYER", "ChangeHorse bloqueado: myHorse invalido");
+            return;
+        }
+
+        uintptr_t addr = getAbsoluteAddress(targetLibName, 0x2F2450);
+        if (addr == 0) return;
+        auto fn = reinterpret_cast<GameCtrlChangeHorseFunc>(addr);
+        fn(gameCtrl, horseID, nullptr);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_PLAYER", "ChangeHorse(%d)", horseID);
+    } catch (...) {}
 }
 
 /**
@@ -2497,6 +2905,18 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
             pendingChaosWeapon = false;
             pendingChaosFx = false;
             pendingKillPoliceOnly = false;
+            pendingHidePolice = false;
+            pendingRecoverPolice = false;
+            pendingPoliceEscalation = false;
+            pendingSetPoliceLevel = -1;
+            trueGodMode = false;
+            disableEnemyAttacks = false;
+            zeroEnemyAccuracy = false;
+            slowMotion = false;
+            freezeEnemies = false;
+            pendingAllDamageUp = -1;
+            pendingMoveSpeedUp = -1;
+            pendingChangeHorse = -1;
             pendingTeleportRequest = TeleportNone;
 
             pendingCustomWordsText[0] = '\0';
@@ -2576,10 +2996,81 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
         pendingKillPoliceOnly = false;
     }
 
+    if (pendingHidePolice) {
+        HideAllPolice();
+        pendingHidePolice = false;
+    }
+
+    if (pendingRecoverPolice) {
+        RecoverAllPolice();
+        pendingRecoverPolice = false;
+    }
+
+    if (pendingSetPoliceLevel >= 0) {
+        int lvl = pendingSetPoliceLevel;
+        pendingSetPoliceLevel = -1;
+        SetPoliceLevel(lvl);
+        char msg[48];
+        std::snprintf(msg, sizeof(msg), "NIVEL POLICIA: %d", lvl);
+        ShowWordsHintText(msg, 2.0f);
+    }
+
+    if (pendingPoliceEscalation) {
+        TriggerPoliceEscalation();
+        pendingPoliceEscalation = false;
+    }
+
     if (pendingTeleportRequest != TeleportNone) {
         const int requestMode = pendingTeleportRequest;
         pendingTeleportRequest = TeleportNone;
         RunTeleportToRequest(requestMode);
+    }
+
+    if (trueGodMode) {
+        ApplyTrueGodMode();
+    }
+    if (disableEnemyAttacks) {
+        static int disableAttackCounter = 0;
+        if ((++disableAttackCounter % 30) == 0) ApplyDisableEnemyAttacks();
+    }
+    if (zeroEnemyAccuracy) {
+        static int zeroAccCounter = 0;
+        if ((++zeroAccCounter % 30) == 0) ApplyZeroEnemyAccuracy();
+    }
+    {
+        static bool lastSlowMotion = false;
+        if (slowMotion != lastSlowMotion) {
+            lastSlowMotion = slowMotion;
+            ApplySlowMotion(slowMotion);
+        }
+    }
+    {
+        static bool lastFreezeEnemies = false;
+        if (freezeEnemies != lastFreezeEnemies) {
+            lastFreezeEnemies = freezeEnemies;
+            ApplyFreezeEnemies(freezeEnemies);
+        }
+    }
+    if (pendingAllDamageUp >= 0) {
+        int val = pendingAllDamageUp;
+        pendingAllDamageUp = -1;
+        ApplyPropertyAdd(val, -1);
+        char msg[48];
+        std::snprintf(msg, sizeof(msg), "DANO: x%d", val);
+        ShowWordsHintText(msg, 2.0f);
+    }
+    if (pendingMoveSpeedUp >= 0) {
+        int val = pendingMoveSpeedUp;
+        pendingMoveSpeedUp = -1;
+        ApplyPropertyAdd(-1, val);
+        char msg[48];
+        std::snprintf(msg, sizeof(msg), "VELOCIDADE: +%d", val);
+        ShowWordsHintText(msg, 2.0f);
+    }
+    if (pendingChangeHorse >= 0) {
+        int id = pendingChangeHorse;
+        pendingChangeHorse = -1;
+        DoChangeHorse(id);
     }
 
     if (flyMode) {
@@ -2795,6 +3286,15 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
         return;
     }
 
+    // Dispara intro na primeira ativação de qualquer função
+    {
+        static bool introTriggered = false;
+        if (!introTriggered) {
+            introTriggered = true;
+            introAnimPending = true;
+        }
+    }
+
     switch (featNum) {
         case 1: // Dano de bala
             if (value >= 1) {
@@ -2863,6 +3363,61 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
             autoClearPolice = boolean;
             __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE",
                                 boolean ? "Auto limpar policiais ativado" : "Auto limpar policiais desativado");
+            break;
+        case 88: // Esconder todos os policiais (HideNonNpcAndPolice)
+            pendingHidePolice = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "HideAllPolice agendado");
+            break;
+        case 89: // Restaurar policiais ocultos (RecoverNonNpcAndPolice)
+            pendingRecoverPolice = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "RecoverAllPolice agendado");
+            break;
+        case 90: // Definir nivel policial (CurPoliceLevel)
+            if (value >= 0 && value <= 10) {
+                pendingSetPoliceLevel = value;
+                __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "SetPoliceLevel(%d) agendado", value);
+            }
+            break;
+        case 91: // Escalar nivel policial via PlayerAttackedNpc
+            pendingPoliceEscalation = true;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "TriggerPoliceEscalation agendado");
+            break;
+        case 92: // Modo Deus Verdadeiro (canHitPlayer = false no GameCtrl)
+            trueGodMode = boolean;
+            if (!boolean) {
+                void* gc = GetGameCtrlInstance();
+                if (IsProbablyValidPtr(gc))
+                    *reinterpret_cast<bool*>(reinterpret_cast<char*>(gc) + 0x3B) = true;
+            }
+            __android_log_print(ANDROID_LOG_INFO, "MOD_PLAYER", boolean ? "TrueGodMode ON" : "TrueGodMode OFF");
+            break;
+        case 93: // Inimigos nao atacam (AIdata.canAttack = false)
+            disableEnemyAttacks = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_ENEMY", boolean ? "DisableEnemyAttacks ON" : "DisableEnemyAttacks OFF");
+            break;
+        case 94: // Precisao zero dos inimigos (AIdata.HitRate = 0)
+            zeroEnemyAccuracy = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_ENEMY", boolean ? "ZeroEnemyAccuracy ON" : "ZeroEnemyAccuracy OFF");
+            break;
+        case 95: // Multiplicador de dano via PropertyAdd.AllDamageUp
+            pendingAllDamageUp = value;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_PLAYER", "AllDamageUp agendado = %d", value);
+            break;
+        case 96: // Multiplicador de velocidade via PropertyAdd.MoveSpeedUp
+            pendingMoveSpeedUp = value;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_PLAYER", "MoveSpeedUp agendado = %d", value);
+            break;
+        case 97: // Camera Lenta (SetTimeScale 0.3 / RecoverTimeScale)
+            slowMotion = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_TIME", boolean ? "SlowMotion ON" : "SlowMotion OFF");
+            break;
+        case 98: // Congelar Inimigos (EnemyFactory.DisableEnemy / EnableEnemy)
+            freezeEnemies = boolean;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_ENEMY", boolean ? "FreezeEnemies ON" : "FreezeEnemies OFF");
+            break;
+        case 99: // Trocar Cavalo (GameCtrl.ChangeHorse)
+            pendingChangeHorse = value;
+            __android_log_print(ANDROID_LOG_INFO, "MOD_PLAYER", "ChangeHorse(%d) agendado", value);
             break;
         case 60: // Teleportar para alvo atual
             pendingTeleportRequest = TeleportCurrentTarget;
@@ -4013,21 +4568,36 @@ void RunKillPoliceOnlyOnce() {
 
         void* gameCtrl = GetGameCtrlInstance();
         void* missionCtrl = GetMissionCtrlInstance();
+        if (!IsProbablyValidPtr(missionCtrl)) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_POLICE", "Kill Police bloqueado: MissionCtrl indisponivel");
+            return;
+        }
         void* enermyGC = IsProbablyValidPtr(gameCtrl) ? *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x24) : nullptr;
         void* enemyFactory = IsProbablyValidPtr(gameCtrl) ? *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x28) : nullptr;
 
-        void* enemies[128] = {};
-        int enemyCount = CollectActiveEnemyBases(enemies, 128);
-        if (enemyCount <= 0) {
-            __android_log_print(ANDROID_LOG_WARN, "MOD_POLICE", "Kill Police bloqueado: sem inimigos armados ativos");
+        // Lê MissionCtrl.policePlayers (0x44) — lista real de policiais (Sheriff/BountyHunter)
+        void* policeListPtr = *reinterpret_cast<void**>(reinterpret_cast<char*>(missionCtrl) + 0x44);
+        if (!IsProbablyValidPtr(policeListPtr)) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_POLICE", "Kill Police bloqueado: policePlayers vazio/nulo");
+            return;
+        }
+        auto* policeList = reinterpret_cast<Il2CppList<void*>*>(policeListPtr);
+        if (!policeList || !policeList->items) {
+            __android_log_print(ANDROID_LOG_WARN, "MOD_POLICE", "Kill Police bloqueado: lista invalida");
             return;
         }
 
+        int size = policeList->size;
+        uint32_t maxLength = policeList->items->max_length;
+        int limit = (size > 0 && size <= 64) ? (size < static_cast<int>(maxLength) ? size : static_cast<int>(maxLength)) : 0;
+
         int touched = 0;
-        for (int i = 0; i < enemyCount; ++i) {
-            void* playerBase = enemies[i];
-            void* player = nullptr;
-            if (!IsBulletTailCompatibleEnemyBase(playerBase, &player)) continue;
+        for (int i = 0; i < limit; ++i) {
+            void* player = policeList->items->items[i];
+            if (!IsProbablyValidPtr(player)) continue;
+
+            // Player.m_player (PlayerBase) offset 0xC
+            void* playerBase = *reinterpret_cast<void**>(reinterpret_cast<char*>(player) + 0xC);
             if (!IsProbablyValidPtr(playerBase)) continue;
 
             void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(playerBase) + 0x14); // PlayerBase.m_dPlayerBaseData
@@ -4036,32 +4606,36 @@ void RunKillPoliceOnlyOnce() {
             void* property = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0x8); // PlayerBaseData.m_dProperty
             if (!IsProbablyValidPtr(property)) continue;
 
+            int baseType = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0xC); // PlayerBaseProperty.baseType
+            // Só policiais: MissionPerson (3) com Sheriff(18) ou BountyHunter(25)
+            if (baseType != MissionPerson) continue;
+
+            void* aiData = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0xC); // PlayerBaseData.m_dAIdata
+            if (!IsProbablyValidPtr(aiData)) continue;
+            int animalType = *reinterpret_cast<int*>(reinterpret_cast<char*>(aiData) + 0x8); // AIdata.animalType
+            if (animalType != Sheriff && animalType != BountyHunter) continue;
+
             int currentBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x14); // PlayerBaseProperty.m_dCurrentBlood
-            int maxBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x10);     // PlayerBaseProperty.m_dMaxBlood
+            int maxBlood    = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x10);  // PlayerBaseProperty.m_dMaxBlood
             if (currentBlood <= 0 || maxBlood <= 0) continue;
 
             int lethalDamage = currentBlood + maxBlood + 5000;
             beHit(playerBase, lethalDamage, 0, nullptr);
             touched++;
 
-            if (IsProbablyValidPtr(missionCtrl) && addrKilledAI != 0) {
-                killedAI(missionCtrl, player, nullptr);
-            }
-            if (IsProbablyValidPtr(missionCtrl) && addrClearEnemy != 0) {
-                clearEnemy(missionCtrl, player, nullptr);
-            }
+            if (IsProbablyValidPtr(missionCtrl) && addrKilledAI != 0) killedAI(missionCtrl, player, nullptr);
+            if (IsProbablyValidPtr(missionCtrl) && addrClearEnemy != 0) clearEnemy(missionCtrl, player, nullptr);
             if (IsProbablyValidPtr(enemyFactory) && addrFactoryContainPlayerBase != 0 && addrFactoryDeletePlayerBase != 0) {
-                if (factoryContainPlayerBase(enemyFactory, playerBase, nullptr)) {
+                if (factoryContainPlayerBase(enemyFactory, playerBase, nullptr))
                     factoryDeletePlayerBase(enemyFactory, playerBase, nullptr);
-                }
             }
-            if (IsProbablyValidPtr(enermyGC) && addrEnemyGC != 0) {
-                enemyGC(enermyGC, player, nullptr);
-            }
+            if (IsProbablyValidPtr(enermyGC) && addrEnemyGC != 0) enemyGC(enermyGC, player, nullptr);
         }
 
-        ShowWordsHintText(touched > 0 ? "NPCS ARMADOS ELIMINADOS" : "SEM NPC ARMADO VALIDO", 2.2f);
-        __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "Kill Police tocou %d NPCs armados compativeis com trail", touched);
+        char msg[64];
+        std::snprintf(msg, sizeof(msg), touched > 0 ? "POLICIA ELIMINADA: %d" : "SEM POLICIA ATIVA", touched);
+        ShowWordsHintText(msg, 2.2f);
+        __android_log_print(ANDROID_LOG_INFO, "MOD_POLICE", "Kill Police eliminou %d policiais (Sheriff/BountyHunter)", touched);
     } catch (...) {
         __android_log_print(ANDROID_LOG_ERROR, "MOD_POLICE", "Falha protegida em RunKillPoliceOnlyOnce");
     }
@@ -4524,6 +5098,8 @@ void ShowWordsHintText(const char* text, float showTime) {
 
 void QueueLoginSuccessHints(const char* displayName, int remainingDays) {
     const char* resolvedName = (displayName && displayName[0]) ? displayName : "ASSINANTE";
+    std::snprintf(gIntroUserName, sizeof(gIntroUserName), "%s", resolvedName);
+    gIntroRemainingDays = remainingDays;
     for (int i = 0; i < 4; ++i) {
         std::snprintf(pendingLoginSuccessHints[i], sizeof(pendingLoginSuccessHints[i]),
                       "BEM-VINDO, %s", resolvedName);

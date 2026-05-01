@@ -15,3 +15,6 @@ const char* GetModSessionToken();
 const char* GetBackendBaseUrl();
 bool SyncRemoteFeatures(JNIEnv* env, const char* baseUrl, const char* sessionToken,
                         std::string* failureReason);
+
+void StartLicenseWatchdog();
+void StopLicenseWatchdog();

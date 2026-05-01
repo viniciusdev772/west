@@ -1,0 +1,99 @@
+Category_Menu de Modificações
+Collapse_Player e Recursos
+CollapseAdd_Category_Player e Recursos
+CollapseAdd_4_Toggle_Vida Infinita (15/02/2026)
+CollapseAdd_1_SeekBar_Dano de bala (15/02/2026)_1_999
+CollapseAdd_2_InputValue_Adicionar Moedas (15/02/2026)
+CollapseAdd_3_InputValue_Adicionar Gems (15/02/2026)
+CollapseAdd_5_SeekBar_Balas das Armas (15/02/2026)_1_999999
+Collapse_Itens
+CollapseAdd_Category_Itens
+CollapseAdd_12_Button_Adicionar Todas as Partes de Armas (15/02/2026)
+CollapseAdd_13_Button_Adicionar Todas as Peles (15/02/2026)
+CollapseAdd_14_Button_Adicionar 10 Whisky (15/02/2026)
+Collapse_Combate
+CollapseAdd_Category_Combate
+CollapseAdd_35_Toggle_AimBot Agressivo (15/02/2026)
+CollapseAdd_22_Toggle_Sempre Headshot (15/02/2026)
+CollapseAdd_43_Toggle_Auto Kill Seguro (08/03/2026)
+CollapseAdd_44_Button_Kill All Agora (08/03/2026)
+CollapseAdd_86_Toggle_Matar Proximos ao Trocar de Arma
+CollapseAdd_87_SeekBar_Raio do Kill na Troca_1_30
+Collapse_ESP Canvas
+CollapseAdd_Category_ESP Canvas
+CollapseAdd_75_Toggle_ESP Canvas (Overlay Java)
+CollapseAdd_64_SeekBar_ESP Vermelho_0_255
+CollapseAdd_65_SeekBar_ESP Verde_0_255
+CollapseAdd_66_SeekBar_ESP Azul_0_255
+CollapseAdd_67_SeekBar_ESP Espessura Box_1_8
+CollapseAdd_68_SeekBar_ESP Espessura Linha_1_8
+CollapseAdd_69_SeekBar_ESP Tamanho Texto_8_32
+CollapseAdd_80_Toggle_ESP Box
+CollapseAdd_70_Toggle_ESP Snapline
+CollapseAdd_71_Toggle_ESP Label
+CollapseAdd_79_Toggle_ESP Skeleton
+CollapseAdd_76_Toggle_ESP 360 Off-screen
+CollapseAdd_77_Toggle_Label do ESP 360
+CollapseAdd_78_Toggle_Contador do ESP 360
+CollapseAdd_72_Spinner_ESP Origem Linha_Topo,Centro,Base
+CollapseAdd_73_SeekBar_ESP Offset X (Centro=200)_0_400
+CollapseAdd_74_SeekBar_ESP Offset Y_0_400
+Collapse_ESP Nativa
+CollapseAdd_Category_ESP Nativa
+CollapseAdd_40_Toggle_ESP Completo (Barras de Vida) (08/03/2026)
+CollapseAdd_41_Button_Atualizar ESP Agora (08/03/2026)
+CollapseAdd_47_Toggle_ESP Inimigos no Minimapa (08/03/2026)
+Collapse_Visual e UI
+CollapseAdd_Category_Visual e UI
+CollapseAdd_36_Button_Criar Mission Hints Visuais (08/03/2026)
+CollapseAdd_37_Button_Remover Mission Hints Visuais (08/03/2026)
+CollapseAdd_38_Button_Mostrar Marcador no Alvo Atual (08/03/2026)
+CollapseAdd_39_Button_Ocultar Marcador do Alvo (08/03/2026)
+CollapseAdd_45_Toggle_Trilhas de Tiro em Todos os Alvos (08/03/2026)
+CollapseAdd_46_Button_Limpar Trilhas de Tiro (08/03/2026)
+CollapseAdd_48_Button_Mostrar Texto de Teste (08/03/2026)
+CollapseAdd_49_InputText_Mostrar Texto Custom (08/03/2026)
+Collapse_Movimento
+CollapseAdd_Category_Movimento
+CollapseAdd_32_Toggle_Modo Voo (Experimental) (15/02/2026)
+CollapseAdd_33_SeekBar_Velocidade Vertical_1_20
+CollapseAdd_34_SeekBar_Ganho de Altura_1_50
+CollapseAdd_50_Toggle_NPCs Voadores (08/03/2026)
+CollapseAdd_51_SeekBar_Forca do Hover NPC_1_30
+CollapseAdd_81_SeekBar_Altura do Hover NPC_1_40
+CollapseAdd_82_SeekBar_Drift Horizontal NPC_1_30
+CollapseAdd_83_SeekBar_Suavidade do Hover NPC_1_20
+CollapseAdd_84_Toggle_Oscilacao do Hover NPC
+CollapseAdd_85_SeekBar_Amplitude da Oscilacao NPC_1_20
+Collapse_Policia
+CollapseAdd_Category_Policia
+CollapseAdd_58_Button_Matar Somente Policiais (08/03/2026)
+CollapseAdd_59_Toggle_Auto Limpar Policiais (08/03/2026)
+CollapseAdd_88_Button_Esconder Todos os Policiais (25/04/2026)
+CollapseAdd_89_Button_Restaurar Policiais Ocultos (25/04/2026)
+CollapseAdd_90_SeekBar_Nivel Policial_0_10
+CollapseAdd_91_Button_Escalar Policia (Simular Ataque) (25/04/2026)
+Collapse_Avancado
+CollapseAdd_Category_Avancado
+CollapseAdd_92_Toggle_Modo Deus Verdadeiro (25/04/2026)
+CollapseAdd_93_Toggle_Inimigos Nao Atacam (25/04/2026)
+CollapseAdd_94_Toggle_Precisao Zero dos Inimigos (25/04/2026)
+CollapseAdd_95_SeekBar_Multiplicador de Dano_1_20
+CollapseAdd_96_SeekBar_Multiplicador de Velocidade_0_10
+CollapseAdd_97_Toggle_Camera Lenta (25/04/2026)
+CollapseAdd_98_Toggle_Congelar Inimigos (25/04/2026)
+CollapseAdd_99_SeekBar_Trocar Cavalo_1_10
+Collapse_Teleport
+CollapseAdd_Category_Teleport
+CollapseAdd_60_Button_Teleportar Para Alvo Atual (10/03/2026)
+CollapseAdd_61_Button_Teleportar Para Hostil Mais Proximo (10/03/2026)
+CollapseAdd_62_Button_Teleportar Para NPC de Missao (10/03/2026)
+CollapseAdd_63_Button_Teleportar Para NPC do Mapa (10/03/2026)
+Collapse_Chaos
+CollapseAdd_Category_Chaos
+CollapseAdd_52_Button_Chaos Time (08/03/2026)
+CollapseAdd_53_Button_Chaos Spawn (08/03/2026)
+CollapseAdd_54_Button_Chaos UI (08/03/2026)
+CollapseAdd_55_Button_Chaos Weapon (08/03/2026)
+CollapseAdd_56_Toggle_NPC War Entre Hostis (08/03/2026)
+CollapseAdd_57_Button_Chaos FX (08/03/2026)
