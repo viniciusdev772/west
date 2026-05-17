@@ -18,6 +18,7 @@
 #include "KittyMemory/MemoryPatch.h"
 #include "DialogOnLoad.h"
 #include "RemoteFeatures.h"
+#include "NpcWalkway.h"
 #include "Menu/Setup.h"
 
 // Define o nome da biblioteca alvo
@@ -114,6 +115,17 @@ void* npcFlightPlayers[kMaxNpcFlightPlayers] = {};
 float npcFlightBaseY[kMaxNpcFlightPlayers] = {};
 float npcFlightTargetY[kMaxNpcFlightPlayers] = {};
 int npcFlightPlayerCount = 0;
+
+struct NpcWarSnapline {
+    void* attackerPlayer;
+    void* targetPlayer;
+    long long expiresAtMs;
+    bool gunAttack;
+};
+
+static constexpr int kMaxNpcWarSnaplines = 24;
+NpcWarSnapline gNpcWarSnaplines[kMaxNpcWarSnaplines] = {};
+
 jmethodID gEspDrawLineMethod = nullptr;
 jmethodID gEspDrawRectMethod = nullptr;
 jmethodID gEspDrawTextMethod = nullptr;
@@ -277,6 +289,7 @@ typedef Vector3 (*PlayerGetPositionFunc)(void* thisPtr, void* method);
 typedef void (*PlayerSetPositionFunc)(void* thisPtr, Vector3 pos, void* method);
 typedef void (*PlayerSetNavMeshEnableFunc)(void* thisPtr, bool enable, void* method);
 typedef void (*PlayerSetNavMeshSpeedFunc)(void* thisPtr, float speed, void* method);
+typedef void (*PlayerSetNavMeshDestFunc)(void* thisPtr, Vector3 dest, void* method);
 typedef void (*PlayerSetCurrentVelocityFunc)(void* thisPtr, Vector3 velocity, void* method);
 typedef void (*PlayerTranslateWithSamplePosFunc)(void* thisPtr, Vector3 velocity, void* method);
 typedef void (*PlayerDisableMoveColliderFunc)(void* thisPtr, void* method);
@@ -290,6 +303,17 @@ typedef void (*PlayerSetRotationCameraDirFunc)(void* thisPtr, void* method);
 typedef void (*PlayerSetCurrentRotationFunc)(void* thisPtr, Vector3 velocity, void* method);
 typedef void (*PlayerRotateToDirFunc)(void* thisPtr, Vector3 dir, void* method);
 typedef void (*PlayerStopRotateFunc)(void* thisPtr, void* method);
+typedef void (*PlayerPlayAttackAnimationFunc)(void* thisPtr, void* method);
+typedef void (*PlayerSimpleAnimFunc)(void* thisPtr, void* method);
+typedef float (*PlayerAnimTimeFunc)(void* thisPtr, void* method);
+typedef bool (*PlayerBoolFunc)(void* thisPtr, void* method);
+typedef void (*PlayerSetCurrentGunTypeNativeFunc)(void* thisPtr, int gunType, void* method);
+typedef void (*PlayerSetGunMountFunc)(void* thisPtr, int mountPos, void* method);
+typedef void* (*GunLoaderGetGunOriDataFunc)(int id, void* method);
+typedef void (*PlayerBaseSimpleFunc)(void* thisPtr, void* method);
+typedef bool (*PlayerBaseBoolFunc)(void* thisPtr, void* method);
+typedef float (*PlayerBaseFloatFunc)(void* thisPtr, void* method);
+typedef void (*PlayerBaseSubBulletsFunc)(void* thisPtr, int num, void* method);
 typedef Vector3 (*MyCtrlPlayerGetPositionFunc)(void* thisPtr, void* method);
 typedef void (*MyCtrlPlayerSetPositionFunc)(void* thisPtr, Vector3 pos, void* method);
 typedef Vector3 (*TransformGetPositionFunc)(void* thisPtr, void* method);
@@ -550,6 +574,7 @@ void RunChaosWeaponOnce();
 void RunChaosFxOnce();
 void RunKillPoliceOnlyOnce();
 void RunNpcWarFrame();
+static void TrackNpcWarSnapline(void* attackerPlayer, void* targetPlayer, bool gunAttack, long long ttlMs);
 bool RunTeleportToRequest(int requestMode);
 void* ResolveBestAggressiveAimTarget(void* myCtrlPlayer);
 void* GetGameCtrlInstance();
@@ -599,6 +624,8 @@ static bool IsHostileEspType(int baseType, int animalType, int gunID);
 static void DrawEspLine(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, float stroke, float fromX, float fromY, float toX, float toY);
 static void DrawEspRect(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, float stroke, float x, float y, float width, float height);
 static void DrawEspText(JNIEnv* env, jobject espView, jobject canvas, int a, int r, int g, int b, const char* text, float x, float y, float size);
+static bool HasActiveNpcWarSnaplines(long long nowMs);
+static void DrawNpcWarSnaplines(JNIEnv* env, jobject espView, jobject canvas, long long nowMs);
 
 bool IsValidAimTransform(void* target, void* playerCtrl) {
     if (!target || target == playerCtrl) return false;
@@ -1210,6 +1237,103 @@ static void DrawEspFilledRect(JNIEnv* env, jobject espView, jobject canvas, int 
     env->CallVoidMethod(espView, gEspDrawFilledRectMethod, canvas, a, r, g, b, x, y, w, h);
 }
 
+static void TrackNpcWarSnapline(void* attackerPlayer, void* targetPlayer, bool gunAttack, long long ttlMs) {
+    if (!IsProbablyValidPtr(attackerPlayer) || !IsProbablyValidPtr(targetPlayer) || attackerPlayer == targetPlayer) return;
+
+    long long nowMs = GetMonotonicTimeMs();
+    int slot = -1;
+    long long oldestExpiry = 0x7fffffffffffffffLL;
+
+    for (int i = 0; i < kMaxNpcWarSnaplines; i++) {
+        NpcWarSnapline& line = gNpcWarSnaplines[i];
+        if (line.attackerPlayer == attackerPlayer && line.targetPlayer == targetPlayer) {
+            slot = i;
+            break;
+        }
+        if (line.expiresAtMs <= nowMs) {
+            slot = i;
+            break;
+        }
+        if (line.expiresAtMs < oldestExpiry) {
+            oldestExpiry = line.expiresAtMs;
+            slot = i;
+        }
+    }
+
+    if (slot < 0) return;
+    gNpcWarSnaplines[slot] = {attackerPlayer, targetPlayer, nowMs + ttlMs, gunAttack};
+}
+
+static bool HasActiveNpcWarSnaplines(long long nowMs) {
+    for (int i = 0; i < kMaxNpcWarSnaplines; i++) {
+        const NpcWarSnapline& line = gNpcWarSnaplines[i];
+        if (line.expiresAtMs > nowMs &&
+            IsProbablyValidPtr(line.attackerPlayer) &&
+            IsProbablyValidPtr(line.targetPlayer)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool GetWarLineScreenPoint(void* player, Vector3& outScreen) {
+    ScreenBox box{};
+    if (TryBuildScreenBoxForPlayer(player, box)) {
+        outScreen.x = box.left + ((box.right - box.left) * 0.5f);
+        outScreen.y = box.top + ((box.bottom - box.top) * 0.42f);
+        outScreen.z = 1.0f;
+        return true;
+    }
+
+    Vector3 world = {0.0f, 0.0f, 0.0f};
+    if (!GetPlayerWorldPosition(player, world)) return false;
+    world.y += 1.0f;
+    return WorldToScreen(world, outScreen);
+}
+
+static void DrawNpcWarSnaplines(JNIEnv* env, jobject espView, jobject canvas, long long nowMs) {
+    for (int i = 0; i < kMaxNpcWarSnaplines; i++) {
+        NpcWarSnapline& line = gNpcWarSnaplines[i];
+        if (line.expiresAtMs <= nowMs) {
+            line = {};
+            continue;
+        }
+        if (!IsProbablyValidPtr(line.attackerPlayer) || !IsProbablyValidPtr(line.targetPlayer)) {
+            line = {};
+            continue;
+        }
+
+        Vector3 attackerScreen = {0.0f, 0.0f, 0.0f};
+        Vector3 targetScreen = {0.0f, 0.0f, 0.0f};
+        if (!GetWarLineScreenPoint(line.attackerPlayer, attackerScreen) ||
+            !GetWarLineScreenPoint(line.targetPlayer, targetScreen)) {
+            continue;
+        }
+
+        float pulse = (line.expiresAtMs - nowMs) > 420 ? 1.0f : 0.65f;
+        float stroke = std::max(2.0f, espLineThickness + (line.gunAttack ? 1.4f : 0.8f)) * pulse;
+        int r = line.gunAttack ? 255 : 255;
+        int g = line.gunAttack ? 210 : 120;
+        int b = line.gunAttack ? 55 : 80;
+
+        DrawEspLine(env, espView, canvas, 230, r, g, b, stroke,
+                    attackerScreen.x, attackerScreen.y,
+                    targetScreen.x, targetScreen.y);
+        DrawEspFilledCircle(env, espView, canvas, 230, r, g, b, attackerScreen.x, attackerScreen.y, 4.0f);
+        DrawEspCircle(env, espView, canvas, 230, r, g, b, 2.0f, targetScreen.x, targetScreen.y, 7.0f);
+    }
+}
+
+static void ClearNpcWarSnaplinesForPlayer(void* player) {
+    if (!player) return;
+    for (int i = 0; i < kMaxNpcWarSnaplines; i++) {
+        if (gNpcWarSnaplines[i].attackerPlayer == player ||
+            gNpcWarSnaplines[i].targetPlayer == player) {
+            gNpcWarSnaplines[i] = {};
+        }
+    }
+}
+
 static bool TryGetPlayerBoneScreen(void* player, uintptr_t boneOffset, Vector3& outScreen) {
     outScreen = {0.0f, 0.0f, 0.0f};
     if (!IsProbablyValidPtr(player)) return false;
@@ -1640,12 +1764,19 @@ void DrawOn(JNIEnv* env, jobject espView, jobject canvas) {
     if (!env || !espView || !canvas) return;
     if (!isLibraryLoaded(targetLibName) || !IsDialogLoginValidated()) return;
     DrawIntroAnimation(env, espView, canvas);
-    if (!espCanvas) return;
+    long long nowMs = GetMonotonicTimeMs();
+    const bool wantsNpcWarSnapline = npcWarMode && HasActiveNpcWarSnaplines(nowMs);
+    if (!espCanvas && !wantsNpcWarSnapline) return;
     if (!EnsureEspJniMethods(env, espView)) return;
 
-    const bool wantsOnScreenBox = espShowBox || espShowSkeleton || espShowSnapline || espShowLabel;
-    const bool wantsOffscreen360 = espShowOffscreen360;
-    if (!wantsOnScreenBox && !wantsOffscreen360) return;
+    const bool wantsOnScreenBox = espCanvas && (espShowBox || espShowSkeleton || espShowSnapline || espShowLabel);
+    const bool wantsOffscreen360 = espCanvas && espShowOffscreen360;
+    if (!wantsOnScreenBox && !wantsOffscreen360 && !wantsNpcWarSnapline) return;
+
+    if (wantsNpcWarSnapline) {
+        DrawNpcWarSnaplines(env, espView, canvas, nowMs);
+        if (!wantsOnScreenBox && !wantsOffscreen360) return;
+    }
 
     void* myPlayer = GetMyPlayerInstance();
     if (!IsProbablyValidPtr(myPlayer)) return;
@@ -2881,6 +3012,7 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
             flyMode = false;
             npcFlyMode = false;
             npcWarMode = false;
+            npcWalkway = false;
             espCanvas = false;
             completeEsp = false;
             autoKill = false;
@@ -2922,6 +3054,7 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
             pendingCustomWordsText[0] = '\0';
             SetFlyRuntimeState(false);
             SetEnemyFlightState(false);
+            SetNpcWalkwayState(false);
             HideTargetMarker();
             ClearCompleteESP();
             ClearBulletTailNow();
@@ -3081,6 +3214,9 @@ void ProcessGameplayFrame(void* myCtrlPlayer) {
     }
     if (npcWarMode) {
         RunNpcWarFrame();
+    }
+    if (npcWalkway) {
+        RunNpcWalkwayFrame();
     }
     if (autoClearPolice) {
         static int autoClearPoliceFrameCounter = 0;
@@ -3418,6 +3554,10 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
         case 99: // Trocar Cavalo (GameCtrl.ChangeHorse)
             pendingChangeHorse = value;
             __android_log_print(ANDROID_LOG_INFO, "MOD_PLAYER", "ChangeHorse(%d) agendado", value);
+            break;
+        case 100: // NPC Walkway — Fileira de NPCs atras do jogador
+            npcWalkway = boolean;
+            SetNpcWalkwayState(npcWalkway);
             break;
         case 60: // Teleportar para alvo atual
             pendingTeleportRequest = TeleportCurrentTarget;
@@ -5428,170 +5568,689 @@ void RunChaosWeaponOnce() {
     }
 }
 
+struct WarCombatant {
+    void* player;
+    void* playerBase;
+    Vector3 pos;
+    int baseType;
+    int animalType;
+    int gunID;
+};
+
+static float WarDistanceSq(const Vector3& a, const Vector3& b) {
+    float dx = a.x - b.x;
+    float dy = a.y - b.y;
+    float dz = a.z - b.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+static Vector3 WarDirXZ(const Vector3& from, const Vector3& to) {
+    Vector3 dir = {to.x - from.x, 0.0f, to.z - from.z};
+    float len = std::sqrt(dir.x * dir.x + dir.z * dir.z);
+    if (len <= 0.0001f) return {0.0f, 0.0f, 1.0f};
+    return {dir.x / len, 0.0f, dir.z / len};
+}
+
+struct WarAttackGate {
+    void* playerBase;
+    int nextFrame;
+};
+
+static WarAttackGate gWarAttackGates[32] = {};
+
+struct WarWeaponPrep {
+    void* player;
+    int gunID;
+    int nextPrepFrame;
+};
+
+static WarWeaponPrep gWarWeaponPreps[32] = {};
+
+struct WarDeadCleanupGate {
+    void* playerBase;
+    int nextFrame;
+};
+
+static WarDeadCleanupGate gWarDeadCleanupGates[32] = {};
+
+static void ClearWarRuntimeForNpc(void* playerBase, void* player) {
+    if (IsProbablyValidPtr(player)) {
+        ClearNpcWarSnaplinesForPlayer(player);
+        for (int i = 0; i < 32; i++) {
+            if (gWarWeaponPreps[i].player == player) {
+                gWarWeaponPreps[i] = {};
+            }
+        }
+    }
+
+    if (IsProbablyValidPtr(playerBase)) {
+        for (int i = 0; i < 32; i++) {
+            if (gWarAttackGates[i].playerBase == playerBase) {
+                gWarAttackGates[i] = {};
+            }
+        }
+    }
+}
+
+static bool ShouldRunWarDeadCleanup(void* playerBase, int frame) {
+    if (!IsProbablyValidPtr(playerBase)) return false;
+
+    int empty = -1;
+    for (int i = 0; i < 32; i++) {
+        if (gWarDeadCleanupGates[i].playerBase == playerBase) {
+            if (frame < gWarDeadCleanupGates[i].nextFrame) return false;
+            gWarDeadCleanupGates[i].nextFrame = frame + 120;
+            return true;
+        }
+        if (empty < 0 && gWarDeadCleanupGates[i].playerBase == nullptr) empty = i;
+    }
+
+    int index = empty >= 0 ? empty : static_cast<int>((reinterpret_cast<uintptr_t>(playerBase) >> 4) % 32);
+    gWarDeadCleanupGates[index].playerBase = playerBase;
+    gWarDeadCleanupGates[index].nextFrame = frame + 120;
+    return true;
+}
+
+static int GetWarAttackGateIndex(void* playerBase) {
+    if (!IsProbablyValidPtr(playerBase)) return -1;
+
+    int empty = -1;
+    for (int i = 0; i < 32; i++) {
+        if (gWarAttackGates[i].playerBase == playerBase) return i;
+        if (empty < 0 && gWarAttackGates[i].playerBase == nullptr) empty = i;
+    }
+
+    if (empty >= 0) {
+        gWarAttackGates[empty].playerBase = playerBase;
+        gWarAttackGates[empty].nextFrame = 0;
+        return empty;
+    }
+
+    uintptr_t slot = reinterpret_cast<uintptr_t>(playerBase) >> 4;
+    int index = static_cast<int>(slot % 32);
+    gWarAttackGates[index].playerBase = playerBase;
+    gWarAttackGates[index].nextFrame = 0;
+    return index;
+}
+
+static bool CanWarAttackNow(void* playerBase, int frame) {
+    int index = GetWarAttackGateIndex(playerBase);
+    return index >= 0 && frame >= gWarAttackGates[index].nextFrame;
+}
+
+static void SetWarAttackCooldown(void* playerBase, int frame, int cooldownFrames) {
+    int index = GetWarAttackGateIndex(playerBase);
+    if (index >= 0) gWarAttackGates[index].nextFrame = frame + cooldownFrames;
+}
+
+static bool WarUsesGun(const WarCombatant& fighter) {
+    if (fighter.baseType == Zombies || fighter.baseType == Ogre || fighter.baseType == Animal) return false;
+    return fighter.gunID > 0;
+}
+
+static int ResolveWarGunType(int gunID, GunLoaderGetGunOriDataFunc getGunOriData) {
+    if (gunID <= 0) return 0; // GunType.RightGun
+
+    if (getGunOriData) {
+        try {
+            void* gunData = getGunOriData(gunID, nullptr);
+            if (IsProbablyValidPtr(gunData)) {
+                int gunType = *reinterpret_cast<int*>(reinterpret_cast<char*>(gunData) + 0x10); // GunOriData.gun_type
+                if (gunType >= 0 && gunType <= 4) return gunType;
+            }
+        } catch (...) {}
+    }
+
+    if (gunID >= 0 && gunID <= 4) return gunID;
+    return 0;
+}
+
+static int WarGunMountPos(int gunType) {
+    switch (gunType) {
+        case 1: return 4; // Player.GunMountPos.DoubleHands
+        case 2:
+        case 3: return 6; // Player.GunMountPos.MiddleFront
+        default: return 2; // Player.GunMountPos.RightHand
+    }
+}
+
+static int GetWarWeaponPrepIndex(void* player, int gunID) {
+    if (!IsProbablyValidPtr(player)) return -1;
+
+    int empty = -1;
+    for (int i = 0; i < 32; i++) {
+        if (gWarWeaponPreps[i].player == player) return i;
+        if (empty < 0 && gWarWeaponPreps[i].player == nullptr) empty = i;
+    }
+
+    int index = empty >= 0 ? empty : static_cast<int>((reinterpret_cast<uintptr_t>(player) >> 4) % 32);
+    gWarWeaponPreps[index] = {player, gunID, 0};
+    return index;
+}
+
+static void PrepareWarGun(const WarCombatant& fighter,
+                          int frame,
+                          GunLoaderGetGunOriDataFunc getGunOriData,
+                          PlayerSetCurrentGunTypeNativeFunc setCurrentGunType,
+                          PlayerSetGunMountFunc setGunMount,
+                          PlayerSimpleAnimFunc enableGun,
+                          PlayerSimpleAnimFunc mountGunToHands,
+                          PlayerBoolFunc isHoldingGun,
+                          PlayerSimpleAnimFunc playTakingGunAI,
+                          PlayerSimpleAnimFunc playGunHoldingAimAI,
+                          bool aimNow) {
+    if (!WarUsesGun(fighter) || !IsProbablyValidPtr(fighter.player)) return;
+
+    int prepIndex = GetWarWeaponPrepIndex(fighter.player, fighter.gunID);
+    if (prepIndex < 0) return;
+
+    WarWeaponPrep& prep = gWarWeaponPreps[prepIndex];
+    if (prep.gunID != fighter.gunID) {
+        prep.gunID = fighter.gunID;
+        prep.nextPrepFrame = 0;
+    }
+
+    int gunType = ResolveWarGunType(fighter.gunID, getGunOriData);
+    if (setCurrentGunType) {
+        setCurrentGunType(fighter.player, gunType, nullptr);
+    }
+    if (enableGun) {
+        enableGun(fighter.player, nullptr);
+    }
+    if (setGunMount) {
+        setGunMount(fighter.player, WarGunMountPos(gunType), nullptr);
+    }
+    if (mountGunToHands) {
+        mountGunToHands(fighter.player, nullptr);
+    }
+
+    bool holding = false;
+    if (isHoldingGun) {
+        try {
+            holding = isHoldingGun(fighter.player, nullptr);
+        } catch (...) {
+            holding = false;
+        }
+    }
+
+    if (!holding && playTakingGunAI && frame >= prep.nextPrepFrame) {
+        playTakingGunAI(fighter.player, nullptr);
+        prep.nextPrepFrame = frame + 90;
+    }
+
+    if (aimNow && playGunHoldingAimAI) {
+        playGunHoldingAimAI(fighter.player, nullptr);
+    }
+}
+
+static void PrimeWarGunShot(const WarCombatant& attacker,
+                            PlayerBaseBoolFunc needReloadBullets,
+                            PlayerBaseSimpleFunc aiReloadBullets,
+                            PlayerBaseSubBulletsFunc subAiBullets,
+                            PlayerBaseSimpleFunc audioGunShoot) {
+    if (!WarUsesGun(attacker) || !IsProbablyValidPtr(attacker.playerBase)) return;
+
+    bool needsReload = false;
+    if (needReloadBullets) {
+        try {
+            needsReload = needReloadBullets(attacker.playerBase, nullptr);
+        } catch (...) {
+            needsReload = false;
+        }
+    }
+    if (needsReload && aiReloadBullets) {
+        aiReloadBullets(attacker.playerBase, nullptr);
+    }
+
+    if (subAiBullets) {
+        subAiBullets(attacker.playerBase, 1, nullptr);
+    }
+    if (audioGunShoot) {
+        audioGunShoot(attacker.playerBase, nullptr);
+    }
+}
+
+static int ResolveWarShootCooldownFrames(void* player,
+                                         PlayerAnimTimeFunc getShootAniTime,
+                                         PlayerAnimTimeFunc reachShootTime1,
+                                         PlayerAnimTimeFunc reachShootTime2) {
+    int cooldownFrames = 95;
+
+    if (getShootAniTime) {
+        float shootTime = getShootAniTime(player, nullptr);
+        if (shootTime > 0.15f && shootTime < 5.0f) {
+            cooldownFrames = static_cast<int>(shootTime * 60.0f) + 18;
+        }
+    }
+
+    float reach1 = 0.0f;
+    float reach2 = 0.0f;
+    if (reachShootTime1) {
+        reach1 = reachShootTime1(player, nullptr);
+    }
+    if (reachShootTime2) {
+        reach2 = reachShootTime2(player, nullptr);
+    }
+    float reach = reach2 > reach1 ? reach2 : reach1;
+    if (reach > 0.05f && reach < 5.0f) {
+        int reachFrames = static_cast<int>(reach * 60.0f) + 24;
+        if (cooldownFrames < reachFrames) cooldownFrames = reachFrames;
+    }
+
+    return cooldownFrames;
+}
+
+static bool GetWarBaseBlood(void* playerBase, int* outCurrentBlood, int* outMaxBlood) {
+    if (outCurrentBlood) *outCurrentBlood = 0;
+    if (outMaxBlood) *outMaxBlood = 0;
+    if (!IsProbablyValidPtr(playerBase)) return false;
+
+    try {
+        void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(playerBase) + 0x14);
+        if (!IsProbablyValidPtr(baseData)) return false;
+
+        void* property = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0x8);
+        if (!IsProbablyValidPtr(property)) return false;
+
+        int maxBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x10);
+        int currentBlood = *reinterpret_cast<int*>(reinterpret_cast<char*>(property) + 0x14);
+        if (maxBlood < 0 || maxBlood > 100000 || currentBlood < -100000 || currentBlood > 100000) return false;
+
+        if (outCurrentBlood) *outCurrentBlood = currentBlood;
+        if (outMaxBlood) *outMaxBlood = maxBlood;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool IsWarBaseAlive(void* playerBase) {
+    int currentBlood = 0;
+    int maxBlood = 0;
+    if (!GetWarBaseBlood(playerBase, &currentBlood, &maxBlood)) return false;
+    return maxBlood > 0 && currentBlood > 0;
+}
+
+static void CleanupWarDeadNpc(void* playerBase,
+                              void* player,
+                              int frame,
+                              MissionCtrlPlayerActionFunc killedAI,
+                              MissionCtrlPlayerActionFunc clearEnemy,
+                              MissionEntityContainEnemyFunc missionContainEnemy,
+                              MissionEntityDeleteEnemyFunc missionDeleteEnemy,
+                              EnemyFactoryContainPlayerBaseFunc factoryContainPlayerBase,
+                              EnemyFactoryDeletePlayerBaseFunc factoryDeletePlayerBase,
+                              EnemyGCFunc enemyGC) {
+    if (!IsProbablyValidPtr(playerBase)) return;
+
+    int currentBlood = 0;
+    int maxBlood = 0;
+    if (!GetWarBaseBlood(playerBase, &currentBlood, &maxBlood)) return;
+    if (maxBlood > 0 && currentBlood > 0) return;
+    if (!ShouldRunWarDeadCleanup(playerBase, frame)) return;
+
+    try {
+        void* gameCtrl = GetGameCtrlInstance();
+        if (!IsProbablyValidPtr(gameCtrl)) return;
+
+        void* enermyGC = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x24);
+        void* enemyFactory = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x28);
+        void* missionCtrl = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x2C);
+        void* missionEntity = *reinterpret_cast<void**>(reinterpret_cast<char*>(gameCtrl) + 0x30);
+
+        if (!IsProbablyValidPtr(player)) {
+            player = *reinterpret_cast<void**>(reinterpret_cast<char*>(playerBase) + 0xC);
+        }
+
+        if (IsProbablyValidPtr(missionCtrl) && IsProbablyValidPtr(player)) {
+            if (killedAI) killedAI(missionCtrl, player, nullptr);
+            if (clearEnemy) clearEnemy(missionCtrl, player, nullptr);
+        }
+
+        if (IsProbablyValidPtr(missionEntity) && missionContainEnemy && missionDeleteEnemy) {
+            if (missionContainEnemy(missionEntity, playerBase, nullptr)) {
+                missionDeleteEnemy(missionEntity, playerBase, nullptr);
+            }
+        }
+
+        if (IsProbablyValidPtr(enemyFactory) && factoryContainPlayerBase && factoryDeletePlayerBase) {
+            if (factoryContainPlayerBase(enemyFactory, playerBase, nullptr)) {
+                factoryDeletePlayerBase(enemyFactory, playerBase, nullptr);
+            }
+        }
+
+        if (IsProbablyValidPtr(enermyGC) && IsProbablyValidPtr(player) && enemyGC) {
+            enemyGC(enermyGC, player, nullptr);
+        }
+
+        ClearWarRuntimeForNpc(playerBase, player);
+    } catch (...) {}
+}
+
+static bool IsWarCombatantType(int baseType, int animalType, int gunID) {
+    if (baseType == EnemyNPC) return true;
+    if (baseType == Zombies || baseType == Ogre) return true;
+    if (baseType == MissionPerson) return animalType == Sheriff || animalType == BountyHunter || gunID > 0;
+    if (baseType == Animal) {
+        return animalType == Cheetah || animalType == Bear ||
+               animalType == Wolf01 || animalType == Wolf02 || animalType == Wolf03;
+    }
+    return false;
+}
+
+static void TuneWarAi(void* playerBase) {
+    if (!IsProbablyValidPtr(playerBase)) return;
+    try {
+        void* baseData = *reinterpret_cast<void**>(reinterpret_cast<char*>(playerBase) + 0x14);
+        if (!IsProbablyValidPtr(baseData)) return;
+        void* aiData = *reinterpret_cast<void**>(reinterpret_cast<char*>(baseData) + 0xC);
+        if (!IsProbablyValidPtr(aiData)) return;
+
+        *reinterpret_cast<int*>(reinterpret_cast<char*>(aiData) + 0x18) = 999;   // currentBulletNum
+        *reinterpret_cast<int*>(reinterpret_cast<char*>(aiData) + 0x1C) = 999;   // maxBulletNum
+        *reinterpret_cast<float*>(reinterpret_cast<char*>(aiData) + 0x24) = 0.75f; // attackWaitTime
+        *reinterpret_cast<float*>(reinterpret_cast<char*>(aiData) + 0x28) = 1.0f; // HitRate
+        *reinterpret_cast<bool*>(reinterpret_cast<char*>(aiData) + 0x31) = true; // canAttack
+    } catch (...) {}
+}
+
+static bool AddWarCombatant(WarCombatant* out, int& count, int maxCount, void* player, void* playerBase) {
+    if (count >= maxCount || !IsProbablyValidPtr(player) || !IsProbablyValidPtr(playerBase)) return false;
+    if (player == GetMyPlayerInstance()) return false;
+    if (!IsWarBaseAlive(playerBase)) return false;
+    for (int i = 0; i < count; i++) {
+        if (out[i].player == player || out[i].playerBase == playerBase) return false;
+    }
+
+    int baseType = -1;
+    int animalType = -1;
+    int gunID = 0;
+    Vector3 pos = {0.0f, 0.0f, 0.0f};
+    if (!ResolvePlayerMetaFromPlayer(player, baseType, animalType, gunID, &pos)) return false;
+    if (!IsWarCombatantType(baseType, animalType, gunID)) return false;
+
+    out[count++] = {player, playerBase, pos, baseType, animalType, gunID};
+    return true;
+}
+
 void RunNpcWarFrame() {
     static int npcWarFrameCounter = 0;
-    static void* cachedAttackerPlayer = nullptr;
-    static void* cachedDefenderPlayer = nullptr;
-    static void* cachedAttackerBase = nullptr;
-    static void* cachedDefenderBase = nullptr;
-    static Vector3 cachedAttackerPos = {0.0f, 0.0f, 0.0f};
-    static Vector3 cachedDefenderPos = {0.0f, 0.0f, 0.0f};
     npcWarFrameCounter++;
-    if ((npcWarFrameCounter % 30) != 0) return;
+    if ((npcWarFrameCounter % 10) != 0) return;
 
     try {
         uintptr_t addrBeHit = getAbsoluteAddress(targetLibName, 0x31B830); // PlayerBase.BeHit()
         uintptr_t addrGetAttackBlood = getAbsoluteAddress(targetLibName, 0x31B7F8); // PlayerBase.GetAttackBlood()
+        uintptr_t addrSetNavMeshEnable = getAbsoluteAddress(targetLibName, 0x34897C); // Player.SetNavMesEnable(bool)
+        uintptr_t addrSetNavMeshSpeed = getAbsoluteAddress(targetLibName, 0x35C038); // Player.SetNavMesSpeed(float)
+        uintptr_t addrSetNavMeshDest = getAbsoluteAddress(targetLibName, 0x344844); // Player.SetNavMesDestination(Vector3)
+        uintptr_t addrSetCurrentVelocity = getAbsoluteAddress(targetLibName, 0x35C8F8); // Player.SetCurrentVelocity(Vector3)
+        uintptr_t addrRotateToDir = getAbsoluteAddress(targetLibName, 0x344E34); // Player.RotateToDir(Vector3)
+        uintptr_t addrSetCurrentGunType = getAbsoluteAddress(targetLibName, 0x361040); // Player.SetCurrentGunType(GunType)
+        uintptr_t addrSetGunMount = getAbsoluteAddress(targetLibName, 0x361058); // Player.SetGunMount(GunMountPos)
+        uintptr_t addrEnableGun = getAbsoluteAddress(targetLibName, 0x361F14); // Player.EnableGun()
+        uintptr_t addrMountGunToHands = getAbsoluteAddress(targetLibName, 0x344F64); // Player.MountGunToHands()
+        uintptr_t addrIsHoldingGun = getAbsoluteAddress(targetLibName, 0x34497C); // Player.IsHoldingGun()
+        uintptr_t addrPlayTakingGunAI = getAbsoluteAddress(targetLibName, 0x344AE0); // Player.PlayTakingGun_AI()
+        uintptr_t addrPlayAttackAnimation = getAbsoluteAddress(targetLibName, 0x353700); // Player.PlayAttackAnimation()
+        uintptr_t addrPlayGunHoldingAimAI = getAbsoluteAddress(targetLibName, 0x344990); // Player.PlayGunHoldingAim_AI()
+        uintptr_t addrPlayShootingAniAI = getAbsoluteAddress(targetLibName, 0x3450FC); // Player.PlayShootingAni_AI()
+        uintptr_t addrGetAttackAniTime = getAbsoluteAddress(targetLibName, 0x353BD4); // Player.GetAttackAniTime()
+        uintptr_t addrGetShootAniTime = getAbsoluteAddress(targetLibName, 0x345708); // Player.GetShootAniTime()
+        uintptr_t addrReachShootTime1AI = getAbsoluteAddress(targetLibName, 0x3452D0); // Player.ReachShootTime1_AI()
+        uintptr_t addrReachShootTime2AI = getAbsoluteAddress(targetLibName, 0x3455AC); // Player.ReachShootTime2_AI()
+        uintptr_t addrGetGunOriData = getAbsoluteAddress(targetLibName, 0x53C8BC); // GunLoader.GetGunOriData(int)
+        uintptr_t addrNeedReloadBullets = getAbsoluteAddress(targetLibName, 0x31BCE0); // PlayerBase.NeedReloadBullets()
+        uintptr_t addrAIReloadBullets = getAbsoluteAddress(targetLibName, 0x31BD24); // PlayerBase.AIReloadBullets()
+        uintptr_t addrSubAIBullets = getAbsoluteAddress(targetLibName, 0x31BC88); // PlayerBase.SubAIBullets(int)
+        uintptr_t addrAudioGunShoot = getAbsoluteAddress(targetLibName, 0x31C87C); // PlayerBase.AudioGunShoot()
+        uintptr_t addrAudioAttack = getAbsoluteAddress(targetLibName, 0x31C554); // PlayerBase.AudioAttack()
+        uintptr_t addrKilledAI = getAbsoluteAddress(targetLibName, 0x2812C4); // MissionCtrl.KilledAI(Player)
+        uintptr_t addrClearEnemy = getAbsoluteAddress(targetLibName, 0x280390); // MissionCtrl.ClearEnemy(Player)
+        uintptr_t addrMissionContainEnemy = getAbsoluteAddress(targetLibName, 0x480EA0); // MissionEntity.ContainEnemy(PlayerBase)
+        uintptr_t addrMissionDeleteEnemy = getAbsoluteAddress(targetLibName, 0x4811A0); // MissionEntity.DeleteEnemy(PlayerBase)
+        uintptr_t addrFactoryContainPlayerBase = getAbsoluteAddress(targetLibName, 0x2E4A34); // EnemyFactory.ContainPlayerBase(PlayerBase)
+        uintptr_t addrFactoryDeletePlayerBase = getAbsoluteAddress(targetLibName, 0x2E4AB4); // EnemyFactory.DeletePlayerBase(PlayerBase)
+        uintptr_t addrEnemyGC = getAbsoluteAddress(targetLibName, 0x2E791C); // EnermyGC.EnemyGC(Player)
         if (addrBeHit == 0) return;
 
         auto beHit = reinterpret_cast<PlayerBaseBeHitFunc>(addrBeHit);
         auto getAttackBlood = reinterpret_cast<int (*)(void*, void*)>(addrGetAttackBlood);
+        auto setNavMeshEnable = reinterpret_cast<PlayerSetNavMeshEnableFunc>(addrSetNavMeshEnable);
+        auto setNavMeshSpeed = reinterpret_cast<PlayerSetNavMeshSpeedFunc>(addrSetNavMeshSpeed);
+        auto setNavMeshDest = reinterpret_cast<PlayerSetNavMeshDestFunc>(addrSetNavMeshDest);
+        auto setCurrentVelocity = reinterpret_cast<PlayerSetCurrentVelocityFunc>(addrSetCurrentVelocity);
+        auto rotateToDir = reinterpret_cast<PlayerRotateToDirFunc>(addrRotateToDir);
+        auto setCurrentGunType = reinterpret_cast<PlayerSetCurrentGunTypeNativeFunc>(addrSetCurrentGunType);
+        auto setGunMount = reinterpret_cast<PlayerSetGunMountFunc>(addrSetGunMount);
+        auto enableGun = reinterpret_cast<PlayerSimpleAnimFunc>(addrEnableGun);
+        auto mountGunToHands = reinterpret_cast<PlayerSimpleAnimFunc>(addrMountGunToHands);
+        auto isHoldingGun = reinterpret_cast<PlayerBoolFunc>(addrIsHoldingGun);
+        auto playTakingGunAI = reinterpret_cast<PlayerSimpleAnimFunc>(addrPlayTakingGunAI);
+        auto playAttackAnimation = reinterpret_cast<PlayerPlayAttackAnimationFunc>(addrPlayAttackAnimation);
+        auto playGunHoldingAimAI = reinterpret_cast<PlayerSimpleAnimFunc>(addrPlayGunHoldingAimAI);
+        auto playShootingAniAI = reinterpret_cast<PlayerSimpleAnimFunc>(addrPlayShootingAniAI);
+        auto getAttackAniTime = reinterpret_cast<PlayerAnimTimeFunc>(addrGetAttackAniTime);
+        auto getShootAniTime = reinterpret_cast<PlayerAnimTimeFunc>(addrGetShootAniTime);
+        auto reachShootTime1AI = reinterpret_cast<PlayerAnimTimeFunc>(addrReachShootTime1AI);
+        auto reachShootTime2AI = reinterpret_cast<PlayerAnimTimeFunc>(addrReachShootTime2AI);
+        auto getGunOriData = reinterpret_cast<GunLoaderGetGunOriDataFunc>(addrGetGunOriData);
+        auto needReloadBullets = reinterpret_cast<PlayerBaseBoolFunc>(addrNeedReloadBullets);
+        auto aiReloadBullets = reinterpret_cast<PlayerBaseSimpleFunc>(addrAIReloadBullets);
+        auto subAiBullets = reinterpret_cast<PlayerBaseSubBulletsFunc>(addrSubAIBullets);
+        auto audioGunShoot = reinterpret_cast<PlayerBaseSimpleFunc>(addrAudioGunShoot);
+        auto audioAttack = reinterpret_cast<PlayerBaseSimpleFunc>(addrAudioAttack);
+        auto killedAI = reinterpret_cast<MissionCtrlPlayerActionFunc>(addrKilledAI);
+        auto clearEnemy = reinterpret_cast<MissionCtrlPlayerActionFunc>(addrClearEnemy);
+        auto missionContainEnemy = reinterpret_cast<MissionEntityContainEnemyFunc>(addrMissionContainEnemy);
+        auto missionDeleteEnemy = reinterpret_cast<MissionEntityDeleteEnemyFunc>(addrMissionDeleteEnemy);
+        auto factoryContainPlayerBase = reinterpret_cast<EnemyFactoryContainPlayerBaseFunc>(addrFactoryContainPlayerBase);
+        auto factoryDeletePlayerBase = reinterpret_cast<EnemyFactoryDeletePlayerBaseFunc>(addrFactoryDeletePlayerBase);
+        auto enemyGC = reinterpret_cast<EnemyGCFunc>(addrEnemyGC);
 
-        void* gameCtrl = GetGameCtrlInstance();
-        if (!IsProbablyValidPtr(gameCtrl)) return;
+        WarCombatant fighters[24] = {};
+        int fighterCount = 0;
 
-        const bool needsRefresh =
-                !IsProbablyValidPtr(cachedAttackerPlayer) || !IsProbablyValidPtr(cachedDefenderPlayer) ||
-                !IsProbablyValidPtr(cachedAttackerBase) || !IsProbablyValidPtr(cachedDefenderBase) ||
-                (npcWarFrameCounter % 150) == 0;
+        void* enemies[96] = {};
+        int enemyCount = CollectActiveEnemyBases(enemies, 96);
+        for (int i = 0; i < enemyCount && fighterCount < 24; i++) {
+            void* player = *reinterpret_cast<void**>(reinterpret_cast<char*>(enemies[i]) + 0xC);
+            if (!IsWarBaseAlive(enemies[i])) {
+                CleanupWarDeadNpc(enemies[i], player, npcWarFrameCounter, killedAI, clearEnemy,
+                                  missionContainEnemy, missionDeleteEnemy,
+                                  factoryContainPlayerBase, factoryDeletePlayerBase,
+                                  enemyGC);
+                continue;
+            }
+            AddWarCombatant(fighters, fighterCount, 24, player, enemies[i]);
+        }
 
-        if (needsRefresh) {
-            void* attackerPlayer = nullptr;
-            void* defenderPlayer = nullptr;
-            void* attackerBase = nullptr;
-            void* defenderBase = nullptr;
-            Vector3 attackerPos = {0.0f, 0.0f, 0.0f};
-            Vector3 defenderPos = {0.0f, 0.0f, 0.0f};
-            float bestDistanceSq = 1.0e30f;
-
-            bool foundPolicePair = false;
-            void* missionCtrl = GetMissionCtrlInstance();
-            if (IsProbablyValidPtr(missionCtrl)) {
-                void* policeListPtr = *reinterpret_cast<void**>(reinterpret_cast<char*>(missionCtrl) + 0x44); // MissionCtrl.policePlayers
-                if (IsProbablyValidPtr(policeListPtr)) {
-                    auto* policeList = reinterpret_cast<Il2CppList<void*>*>(policeListPtr);
-                    if (policeList && policeList->items) {
-                        int size = policeList->size;
-                        if (size > 1 && size <= 64) {
-                            uint32_t maxLength = policeList->items->max_length;
-                            int limit = size < static_cast<int>(maxLength) ? size : static_cast<int>(maxLength);
-                            for (int i = 0; i < limit; ++i) {
-                                void* lhsPlayer = policeList->items->items[i];
-                                void* lhsBase = nullptr;
-                                Vector3 lhsPos = {0.0f, 0.0f, 0.0f};
-                                if (!IsPoliceWarEligiblePlayer(lhsPlayer, &lhsBase, &lhsPos)) continue;
-
-                                for (int j = i + 1; j < limit; ++j) {
-                                    void* rhsPlayer = policeList->items->items[j];
-                                    void* rhsBase = nullptr;
-                                    Vector3 rhsPos = {0.0f, 0.0f, 0.0f};
-                                    if (!IsPoliceWarEligiblePlayer(rhsPlayer, &rhsBase, &rhsPos)) continue;
-
-                                    float dx = rhsPos.x - lhsPos.x;
-                                    float dy = rhsPos.y - lhsPos.y;
-                                    float dz = rhsPos.z - lhsPos.z;
-                                    float distanceSq = dx * dx + dy * dy + dz * dz;
-                                    if (distanceSq < 9.0f || distanceSq > 256.0f) continue;
-
-                                    if (distanceSq < bestDistanceSq) {
-                                        bestDistanceSq = distanceSq;
-                                        attackerPlayer = lhsPlayer;
-                                        defenderPlayer = rhsPlayer;
-                                        attackerPos = lhsPos;
-                                        defenderPos = rhsPos;
-                                        attackerBase = lhsBase;
-                                        defenderBase = rhsBase;
-                                        foundPolicePair = true;
-                                    }
-                                }
-                            }
+        void* missionCtrl = GetMissionCtrlInstance();
+        if (IsProbablyValidPtr(missionCtrl) && fighterCount < 24) {
+            void* policeListPtr = *reinterpret_cast<void**>(reinterpret_cast<char*>(missionCtrl) + 0x44); // MissionCtrl.policePlayers
+            if (IsProbablyValidPtr(policeListPtr)) {
+                auto* policeList = reinterpret_cast<Il2CppList<void*>*>(policeListPtr);
+                if (policeList && policeList->items && policeList->size > 0 && policeList->size <= 64) {
+                    uint32_t maxLength = policeList->items->max_length;
+                    int limit = policeList->size < static_cast<int>(maxLength) ? policeList->size : static_cast<int>(maxLength);
+                    for (int i = 0; i < limit && fighterCount < 24; i++) {
+                        void* player = policeList->items->items[i];
+                        void* playerBase = GetPlayerBaseFromPlayer(player);
+                        if (!IsWarBaseAlive(playerBase)) {
+                            CleanupWarDeadNpc(playerBase, player, npcWarFrameCounter, killedAI, clearEnemy,
+                                              missionContainEnemy, missionDeleteEnemy,
+                                              factoryContainPlayerBase, factoryDeletePlayerBase,
+                                              enemyGC);
+                            continue;
                         }
+                        AddWarCombatant(fighters, fighterCount, 24, player, playerBase);
                     }
                 }
             }
+        }
 
-            if (!foundPolicePair) {
-                void* enemies[48] = {};
-                int enemyCount = CollectActiveEnemyBases(enemies, 48);
-                if (enemyCount < 2) return;
+        if (fighterCount < 2) return;
 
-                for (int i = 0; i < enemyCount; ++i) {
-                    void* lhsPlayer = nullptr;
-                    void* lhsBase = nullptr;
-                    Vector3 lhsPos = {0.0f, 0.0f, 0.0f};
-                    if (!IsNpcWarEligibleEnemyBase(enemies[i], &lhsPlayer, &lhsBase, &lhsPos)) continue;
+        bool used[24] = {};
+        for (int i = 0; i < fighterCount; i++) {
+            if (used[i]) continue;
 
-                    for (int j = i + 1; j < enemyCount; ++j) {
-                        void* rhsPlayer = nullptr;
-                        void* rhsBase = nullptr;
-                        Vector3 rhsPos = {0.0f, 0.0f, 0.0f};
-                        if (!IsNpcWarEligibleEnemyBase(enemies[j], &rhsPlayer, &rhsBase, &rhsPos)) continue;
-                        if (!IsProbablyValidPtr(rhsPlayer) || rhsPlayer == lhsPlayer) continue;
+            int best = -1;
+            float bestDistSq = 1.0e30f;
+            for (int j = 0; j < fighterCount; j++) {
+                if (i == j || used[j]) continue;
+                float distSq = WarDistanceSq(fighters[i].pos, fighters[j].pos);
+                if (distSq < bestDistSq && distSq <= 625.0f) {
+                    bestDistSq = distSq;
+                    best = j;
+                }
+            }
+            if (best < 0) continue;
 
-                        float dx = rhsPos.x - lhsPos.x;
-                        float dy = rhsPos.y - lhsPos.y;
-                        float dz = rhsPos.z - lhsPos.z;
-                        float distanceSq = dx * dx + dy * dy + dz * dz;
-                        if (distanceSq < 9.0f || distanceSq > 196.0f) continue;
+            used[i] = true;
+            used[best] = true;
 
-                        if (distanceSq < bestDistanceSq) {
-                            bestDistanceSq = distanceSq;
-                            attackerPlayer = lhsPlayer;
-                            defenderPlayer = rhsPlayer;
-                            attackerPos = lhsPos;
-                            defenderPos = rhsPos;
-                            attackerBase = lhsBase;
-                            defenderBase = rhsBase;
-                        }
+            WarCombatant& a = fighters[i];
+            WarCombatant& b = fighters[best];
+            if (!IsWarBaseAlive(a.playerBase)) {
+                CleanupWarDeadNpc(a.playerBase, a.player, npcWarFrameCounter, killedAI, clearEnemy,
+                                  missionContainEnemy, missionDeleteEnemy,
+                                  factoryContainPlayerBase, factoryDeletePlayerBase,
+                                  enemyGC);
+                continue;
+            }
+            if (!IsWarBaseAlive(b.playerBase)) {
+                CleanupWarDeadNpc(b.playerBase, b.player, npcWarFrameCounter, killedAI, clearEnemy,
+                                  missionContainEnemy, missionDeleteEnemy,
+                                  factoryContainPlayerBase, factoryDeletePlayerBase,
+                                  enemyGC);
+                continue;
+            }
+            TuneWarAi(a.playerBase);
+            TuneWarAi(b.playerBase);
+
+            Vector3 dirAB = WarDirXZ(a.pos, b.pos);
+            Vector3 dirBA = WarDirXZ(b.pos, a.pos);
+            bool aUsesGun = WarUsesGun(a);
+            bool bUsesGun = WarUsesGun(b);
+            bool pairHasGun = aUsesGun || bUsesGun;
+            float attackDistSq = pairHasGun ? 144.0f : 4.0f;
+            float stopOffset = pairHasGun ? 8.0f : 1.35f;
+
+            if (aUsesGun) {
+                PrepareWarGun(a, npcWarFrameCounter, getGunOriData, setCurrentGunType, setGunMount,
+                              enableGun, mountGunToHands, isHoldingGun, playTakingGunAI, playGunHoldingAimAI,
+                              bestDistSq <= attackDistSq);
+            }
+            if (bUsesGun) {
+                PrepareWarGun(b, npcWarFrameCounter, getGunOriData, setCurrentGunType, setGunMount,
+                              enableGun, mountGunToHands, isHoldingGun, playTakingGunAI, playGunHoldingAimAI,
+                              bestDistSq <= attackDistSq);
+            }
+
+            if (addrRotateToDir != 0) {
+                rotateToDir(a.player, dirAB, nullptr);
+                rotateToDir(b.player, dirBA, nullptr);
+            }
+
+            if (bestDistSq > attackDistSq && addrSetNavMeshDest != 0) {
+                if (addrSetNavMeshEnable != 0) {
+                    setNavMeshEnable(a.player, true, nullptr);
+                    setNavMeshEnable(b.player, true, nullptr);
+                }
+                if (addrSetNavMeshSpeed != 0) {
+                    setNavMeshSpeed(a.player, pairHasGun ? 3.2f : 4.0f, nullptr);
+                    setNavMeshSpeed(b.player, pairHasGun ? 3.2f : 4.0f, nullptr);
+                }
+                Vector3 aDest = b.pos;
+                Vector3 bDest = a.pos;
+                aDest.x -= dirAB.x * stopOffset;
+                aDest.z -= dirAB.z * stopOffset;
+                bDest.x -= dirBA.x * stopOffset;
+                bDest.z -= dirBA.z * stopOffset;
+                setNavMeshDest(a.player, aDest, nullptr);
+                setNavMeshDest(b.player, bDest, nullptr);
+                continue;
+            }
+
+            if (addrSetNavMeshEnable != 0) {
+                setNavMeshEnable(a.player, false, nullptr);
+                setNavMeshEnable(b.player, false, nullptr);
+            }
+            if (addrSetCurrentVelocity != 0) {
+                Vector3 zeroVel = {0.0f, 0.0f, 0.0f};
+                setCurrentVelocity(a.player, zeroVel, nullptr);
+                setCurrentVelocity(b.player, zeroVel, nullptr);
+            }
+
+            WarCombatant* attacker = &a;
+            WarCombatant* target = &b;
+            bool attackerUsesGun = aUsesGun;
+            if (((npcWarFrameCounter / 90) + i) % 2 != 0) {
+                attacker = &b;
+                target = &a;
+                attackerUsesGun = bUsesGun;
+            }
+            if (!attackerUsesGun && bestDistSq > 4.0f) {
+                if (target == &a && aUsesGun) {
+                    attacker = &a;
+                    target = &b;
+                    attackerUsesGun = true;
+                } else if (target == &b && bUsesGun) {
+                    attacker = &b;
+                    target = &a;
+                    attackerUsesGun = true;
+                } else {
+                    continue;
+                }
+            }
+            TrackNpcWarSnapline(attacker->player, target->player, attackerUsesGun, attackerUsesGun ? 520LL : 420LL);
+            if (!CanWarAttackNow(attacker->playerBase, npcWarFrameCounter)) continue;
+
+            bool playedAttack = false;
+            int cooldownFrames = attackerUsesGun ? 95 : 80;
+            if (attackerUsesGun) {
+                PrepareWarGun(*attacker, npcWarFrameCounter, getGunOriData, setCurrentGunType, setGunMount,
+                              enableGun, mountGunToHands, isHoldingGun, playTakingGunAI, playGunHoldingAimAI,
+                              true);
+                if (addrPlayShootingAniAI != 0) {
+                    PrimeWarGunShot(*attacker, needReloadBullets, aiReloadBullets, subAiBullets, audioGunShoot);
+                    playShootingAniAI(attacker->player, nullptr);
+                    playedAttack = true;
+                }
+                cooldownFrames = ResolveWarShootCooldownFrames(attacker->player, getShootAniTime, reachShootTime1AI, reachShootTime2AI);
+            } else if (addrPlayAttackAnimation != 0) {
+                if (audioAttack) {
+                    audioAttack(attacker->playerBase, nullptr);
+                }
+                playAttackAnimation(attacker->player, nullptr);
+                playedAttack = true;
+                if (addrGetAttackAniTime != 0) {
+                    float attackTime = getAttackAniTime(attacker->player, nullptr);
+                    if (attackTime > 0.15f && attackTime < 5.0f) {
+                        cooldownFrames = static_cast<int>(attackTime * 60.0f) + 18;
                     }
                 }
             }
+            if (!playedAttack) continue;
 
-            cachedAttackerPlayer = attackerPlayer;
-            cachedDefenderPlayer = defenderPlayer;
-            cachedAttackerBase = attackerBase;
-            cachedDefenderBase = defenderBase;
-            cachedAttackerPos = attackerPos;
-            cachedDefenderPos = defenderPos;
-        } else {
-            if (!GetPlayerWorldPosition(cachedAttackerPlayer, cachedAttackerPos) ||
-                !GetPlayerWorldPosition(cachedDefenderPlayer, cachedDefenderPos)) {
-                cachedAttackerPlayer = nullptr;
-                cachedDefenderPlayer = nullptr;
-                cachedAttackerBase = nullptr;
-                cachedDefenderBase = nullptr;
-                return;
+            int damage = attackerUsesGun ? 9 : 7;
+            if (addrGetAttackBlood != 0) {
+                int rawDamage = getAttackBlood(attacker->playerBase, nullptr);
+                if (rawDamage > 0 && rawDamage < 5000) damage = rawDamage;
             }
-        }
+            if (damage > 14) damage = 14;
 
-        if (!IsProbablyValidPtr(cachedAttackerPlayer) || !IsProbablyValidPtr(cachedDefenderPlayer) ||
-            !IsProbablyValidPtr(cachedAttackerBase) || !IsProbablyValidPtr(cachedDefenderBase)) {
-            return;
-        }
-
-        int attackerDamage = 6;
-        int defenderDamage = 6;
-        if (addrGetAttackBlood != 0) {
-            int lhsDamage = getAttackBlood(cachedAttackerBase, nullptr);
-            int rhsDamage = getAttackBlood(cachedDefenderBase, nullptr);
-            if (lhsDamage > 0 && lhsDamage < 5000) attackerDamage = lhsDamage;
-            if (rhsDamage > 0 && rhsDamage < 5000) defenderDamage = rhsDamage;
-        }
-        attackerDamage = attackerDamage > 18 ? 18 : attackerDamage;
-        defenderDamage = defenderDamage > 18 ? 18 : defenderDamage;
-
-        beHit(cachedDefenderBase, attackerDamage, 0, nullptr);
-        beHit(cachedAttackerBase, defenderDamage, 0, nullptr);
-
-        if ((npcWarFrameCounter % 90) == 0) {
-            void* bulletTailFactory = GetBulletTailFactoryInstance();
-            if (IsProbablyValidPtr(bulletTailFactory)) {
-                GenerateBulletTailForPlayer(bulletTailFactory, cachedAttackerPos, cachedDefenderPlayer, true);
-                GenerateBulletTailForPlayer(bulletTailFactory, cachedDefenderPos, cachedAttackerPlayer, true);
-            }
+            beHit(target->playerBase, damage, attackerUsesGun ? 0 : 1, nullptr);
+            SetWarAttackCooldown(attacker->playerBase, npcWarFrameCounter, cooldownFrames);
+            TrackNpcWarSnapline(attacker->player, target->player, attackerUsesGun, attackerUsesGun ? 900LL : 650LL);
+            CleanupWarDeadNpc(target->playerBase, target->player, npcWarFrameCounter, killedAI, clearEnemy,
+                              missionContainEnemy, missionDeleteEnemy,
+                              factoryContainPlayerBase, factoryDeletePlayerBase,
+                              enemyGC);
         }
     } catch (...) {
-        __android_log_print(ANDROID_LOG_ERROR, "MOD_CHAOS", "Falha protegida no NPC War");
+        __android_log_print(ANDROID_LOG_ERROR, "MOD_CHAOS", "Falha protegida no NPC War massivo");
     }
 }
 

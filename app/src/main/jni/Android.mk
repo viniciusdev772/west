@@ -24,6 +24,7 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH) \
 LOCAL_SRC_FILES := Main.cpp \
     DialogOnLoad.cpp \
     RemoteFeatures.cpp \
+    NpcWalkway.cpp \
 	Substrate/hde64.c \
 	Substrate/SubstrateDebug.cpp \
 	Substrate/SubstrateHook.cpp \
